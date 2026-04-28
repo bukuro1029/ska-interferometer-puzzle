@@ -640,9 +640,9 @@ def fig_layout(pos: np.ndarray, radius: float, unit: str) -> plt.Figure:
     ax.set_aspect("equal", adjustable="box")
     ax.set_xlim(-1.08 * radius, 1.08 * radius)
     ax.set_ylim(-1.08 * radius, 1.08 * radius)
-    ax.set_title("アンテナ / station 配置")
-    ax.set_xlabel(f"東西方向（{unit}）")
-    ax.set_ylabel(f"南北方向（{unit}）")
+    ax.set_title("Antenna / station layout")
+    ax.set_xlabel(f"East-West ({unit})")
+    ax.set_ylabel(f"North-South ({unit})")
     ax.grid(alpha=0.25)
     return fig
 
@@ -655,11 +655,10 @@ def fig_uv(weight: np.ndarray, title: str) -> plt.Figure:
     ax.set_yticks([])
     return fig
 
-
 def fig_sky(sky: np.ndarray) -> plt.Figure:
     fig, ax = plt.subplots(figsize=(4, 4))
     ax.imshow(sky, origin="upper", interpolation="nearest", vmin=0, vmax=1)
-    ax.set_title("入力画像 / 本来の構造")
+    ax.set_title("Input image / true structure")
     ax.set_xticks([])
     ax.set_yticks([])
     return fig
@@ -667,7 +666,7 @@ def fig_sky(sky: np.ndarray) -> plt.Figure:
 
 def fig_dirty(dirty: np.ndarray, display_mode: str, fixed_vmax: float) -> plt.Figure:
     fig, ax = plt.subplots(figsize=(4, 4))
-    if display_mode == "自動コントラスト（形の変化を見やすい）":
+    if display_mode == "Auto contrast (show shape clearly)":
         img = robust_normalize(dirty, symmetric=True)
         ax.imshow(img, origin="upper", interpolation="nearest", vmin=-1, vmax=1)
     else:
@@ -678,7 +677,7 @@ def fig_dirty(dirty: np.ndarray, display_mode: str, fixed_vmax: float) -> plt.Fi
             vmin=-fixed_vmax,
             vmax=fixed_vmax,
         )
-    ax.set_title("復元された画像（簡易 dirty image）")
+    ax.set_title("Reconstructed image (dirty image)")
     ax.set_xticks([])
     ax.set_yticks([])
     return fig
@@ -1078,14 +1077,13 @@ if outside_fraction > 0.05:
     )
 
 st.markdown("---")
-st.subheader("1. 置いたアンテナで、どんな画像が見えるか")
-
+st.subheader("1. Antenna layout and reconstructed image")
 if show_true:
     cols = st.columns(4)
     with cols[0]:
         st.pyplot(fig_layout(pos, radius, unit), use_container_width=True)
     with cols[1]:
-        st.pyplot(fig_uv(effective_uv, "有効 uv coverage\n（dirty画像に使う重み）"), use_container_width=True)
+        st.pyplot(fig_uv(effective_uv, "Effective uv coverage\n(used for dirty image)"), use_container_width=True)
     with cols[2]:
         st.pyplot(fig_dirty(dirty, display_mode, fixed_vmax), use_container_width=True)
     with cols[3]:
@@ -1095,7 +1093,7 @@ else:
     with cols[0]:
         st.pyplot(fig_layout(pos, radius, unit), use_container_width=True)
     with cols[1]:
-        st.pyplot(fig_uv(effective_uv, "有効 uv coverage\n（dirty画像に使う重み）"), use_container_width=True)
+        st.pyplot(fig_uv(effective_uv, "Effective uv coverage\n(used for dirty image)"), use_container_width=True)
     with cols[2]:
         st.pyplot(fig_dirty(dirty, display_mode, fixed_vmax), use_container_width=True)
 
