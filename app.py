@@ -12,6 +12,10 @@ Purpose:
 Important:
     This is an outreach-oriented educational simulator, not a precision radio
     interferometric imaging pipeline.
+
+Language policy in this version:
+    - Matplotlib figure labels are in English to avoid font rendering issues online.
+    - Streamlit UI and explanatory text are in Japanese.
 """
 
 from __future__ import annotations
@@ -43,40 +47,40 @@ st.set_page_config(
 # ============================================================
 
 TELESCOPE_PRESETS: Dict[str, Dict[str, object]] = {
-    "Educational mini array": {
+    "教育用ミニ干渉計": {
         "interferometric_elements": 16,
         "physical_antennas": 16,
         "max_baseline": 20.0,
         "unit": "km",
-        "display_cap": 32,
-        "note": "A small virtual array for outreach. These are not real instrument specifications.",
+        "display_cap": 64,
+        "note": "展示用の小さな仮想配列です。実機仕様ではありません。",
     },
-    "SKA-Low scale": {
+    "SKA-Lowスケール": {
         "interferometric_elements": 512,
         "physical_antennas": 131_072,
         "max_baseline": 74.0,
         "unit": "km",
-        "display_cap": 96,
+        "display_cap": 128,
         "note": (
-            "Low-frequency mode. 131,072 physical antennas are grouped into 512 stations. "
-            "The station centers are used as interferometric elements."
+            "低周波用の想定です。131,072本の物理アンテナを512 stationにまとめ、"
+            "station中心を干渉計要素として扱います。"
         ),
     },
-    "SKA-Mid scale": {
+    "SKA-Midスケール": {
         "interferometric_elements": 197,
         "physical_antennas": 197,
         "max_baseline": 150.0,
         "unit": "km",
-        "display_cap": 96,
-        "note": "Mid-frequency mode. 197 dishes are used as interferometric elements.",
+        "display_cap": 128,
+        "note": "中周波用の想定です。197台のディッシュを干渉計要素として扱います。",
     },
-    "Custom": {
+    "カスタム": {
         "interferometric_elements": 64,
         "physical_antennas": 64,
         "max_baseline": 40.0,
         "unit": "km",
-        "display_cap": 96,
-        "note": "Enter any telescope specification you want.",
+        "display_cap": 128,
+        "note": "任意の望遠鏡仕様を入力できます。",
     },
 }
 
@@ -84,6 +88,7 @@ TELESCOPE_PRESETS: Dict[str, Dict[str, object]] = {
 # ============================================================
 # Utility functions
 # ============================================================
+
 
 def robust_normalize(img: np.ndarray, symmetric: bool = False) -> np.ndarray:
     arr = np.asarray(img, dtype=float)
@@ -110,7 +115,8 @@ def blur_array(arr: np.ndarray, passes: int = 2) -> np.ndarray:
     for _ in range(max(0, passes)):
         out = (
             4.0 * out
-            + 2.0 * (
+            + 2.0
+            * (
                 np.roll(out, 1, axis=0)
                 + np.roll(out, -1, axis=0)
                 + np.roll(out, 1, axis=1)
@@ -129,16 +135,23 @@ def blur_array(arr: np.ndarray, passes: int = 2) -> np.ndarray:
     return out
 
 
-def uv_count_factor(elements: int, reference_elements: int, strength: float = 1.0) -> float:
+def uv_count_factor(elements: int, reference_elements: int, strength: float = 2.0) -> float:
     """
     Convert interferometric element count to a 0-1 factor for uv filling.
-    Uses nonlinear compressed scaling for outreach.
+
+    This version is deliberately tuned for outreach:
+    increasing the element count should visibly fill the uv plane.
     """
     n = max(float(elements), 2.0)
     ref = max(float(reference_elements), 2.0)
 
-    x = np.log10(n / ref + 1.0)
-    response = 1.0 - np.exp(-strength * x)
+    pairs = n * (n - 1.0) / 2.0
+    ref_pairs = ref * (ref - 1.0) / 2.0
+
+    x = np.log10(pairs + 1.0) / np.log10(ref_pairs + 1.0)
+    x = np.clip(x, 0.0, 1.0)
+
+    response = x ** (1.0 / max(strength, 1e-6))
     return float(np.clip(response, 0.0, 1.0))
 
 
@@ -188,7 +201,7 @@ def make_sky(n: int, model: str, seed: int) -> np.ndarray:
     rng = np.random.default_rng(seed)
     sky = np.zeros((n, n), dtype=float)
 
-    if model == "Extended hydrogen gas + small galaxies":
+    if model == "広がった水素ガス + 小銀河":
         sky += gaussian_2d(n, -0.18, 0.08, 0.38, 0.21, amp=1.0, theta=0.7)
         sky += gaussian_2d(n, 0.34, -0.28, 0.18, 0.10, amp=0.55, theta=-0.4)
         for _ in range(10):
@@ -201,7 +214,7 @@ def make_sky(n: int, model: str, seed: int) -> np.ndarray:
                 amp=rng.uniform(0.25, 0.85),
             )
 
-    elif model == "Many point sources":
+    elif model == "多数の点源":
         for _ in range(26):
             sky += gaussian_2d(
                 n,
@@ -212,7 +225,7 @@ def make_sky(n: int, model: str, seed: int) -> np.ndarray:
                 amp=rng.uniform(0.25, 1.25),
             )
 
-    elif model == "Bubble-like cosmic structure":
+    elif model == "泡構造風の宇宙":
         sky += 0.50 * gaussian_2d(n, 0.0, 0.0, 0.82, 0.82, amp=1.0)
         for _ in range(14):
             r = rng.uniform(0.07, 0.22)
@@ -226,7 +239,7 @@ def make_sky(n: int, model: str, seed: int) -> np.ndarray:
             )
         sky -= sky.min()
 
-    elif model == "SKA letters":
+    elif model == "SKAの文字":
         sky += gaussian_2d(n, -0.55, 0.45, 0.16, 0.08, amp=0.9)
         sky += gaussian_2d(n, -0.60, 0.15, 0.10, 0.08, amp=0.9)
         sky += gaussian_2d(n, -0.50, -0.15, 0.10, 0.08, amp=0.9)
@@ -244,7 +257,7 @@ def make_sky(n: int, model: str, seed: int) -> np.ndarray:
         for x in np.linspace(0.40, 0.70, 12):
             sky += gaussian_2d(n, x, 0.0, 0.02, 0.02, amp=0.9)
 
-    elif model == "Large disk + small points":
+    elif model == "大きな円 + 小さな点":
         sky += gaussian_2d(n, 0.0, 0.0, 0.42, 0.42, amp=0.8)
         for _ in range(8):
             sky += gaussian_2d(
@@ -263,13 +276,13 @@ def make_sky(n: int, model: str, seed: int) -> np.ndarray:
 
 
 def apply_manual_rotation(img: Image.Image, rotation_label: str) -> Image.Image:
-    if rotation_label == "0° (no rotation)":
+    if rotation_label == "0°（そのまま）":
         return img
-    if rotation_label == "90° clockwise":
+    if rotation_label == "90° 時計回り":
         return img.rotate(-90, expand=True)
     if rotation_label == "180°":
         return img.rotate(180, expand=True)
-    if rotation_label == "90° counterclockwise":
+    if rotation_label == "90° 反時計回り":
         return img.rotate(90, expand=True)
     return img
 
@@ -294,7 +307,7 @@ def load_uploaded_sky(
     invert: bool = False,
     threshold: float = 0.0,
     gamma: float = 1.0,
-    manual_rotation: str = "0° (no rotation)",
+    manual_rotation: str = "0°（そのまま）",
     keep_aspect: bool = True,
 ) -> np.ndarray:
     img = Image.open(uploaded_file)
@@ -328,6 +341,7 @@ def load_uploaded_sky(
 # Layout generation
 # ============================================================
 
+
 def clip_to_radius(pos: np.ndarray, radius: float) -> np.ndarray:
     r = np.hypot(pos[:, 0], pos[:, 1])
     mask = r > radius
@@ -339,10 +353,10 @@ def clip_to_radius(pos: np.ndarray, radius: float) -> np.ndarray:
 def make_layout(kind: str, n: int, radius: float, seed: int) -> np.ndarray:
     rng = np.random.default_rng(seed)
 
-    if kind == "Core concentrated":
+    if kind == "中心集中型":
         return clip_to_radius(rng.normal(0, 0.18 * radius, size=(n, 2)), radius)
 
-    if kind == "Long-baseline biased":
+    if kind == "長基線重視型":
         n_core = max(3, n // 3)
         core = rng.normal(0, 0.12 * radius, size=(n_core, 2))
         n_outer = n - n_core
@@ -351,17 +365,17 @@ def make_layout(kind: str, n: int, radius: float, seed: int) -> np.ndarray:
         outer = np.column_stack([rr * np.cos(th), rr * np.sin(th)])
         return np.vstack([core, outer])
 
-    if kind == "Linear":
+    if kind == "直線型":
         x = np.linspace(-radius, radius, n)
         y = rng.normal(0, 0.025 * radius, n)
         return np.column_stack([x, y])
 
-    if kind == "Random":
+    if kind == "ランダム型":
         th = rng.uniform(0, 2 * np.pi, n)
         rr = radius * np.sqrt(rng.uniform(0, 1, n))
         return np.column_stack([rr * np.cos(th), rr * np.sin(th)])
 
-    if kind == "Three-arm":
+    if kind == "三本腕型":
         arms = np.arange(n) % 3
         base = arms * 2 * np.pi / 3
         rr = radius * (0.08 + 0.92 * np.linspace(0, 1, n))
@@ -371,7 +385,7 @@ def make_layout(kind: str, n: int, radius: float, seed: int) -> np.ndarray:
         pos += rng.normal(0, 0.015 * radius, size=pos.shape)
         return clip_to_radius(pos, radius)
 
-    if kind == "SKA-like balanced":
+    if kind == "SKA風バランス型":
         n_core = max(5, int(0.48 * n))
         core = rng.normal(0, 0.11 * radius, size=(n_core, 2))
         n_arm = n - n_core
@@ -399,6 +413,7 @@ def baselines(pos: np.ndarray) -> np.ndarray:
 # ============================================================
 # uv coverage and dirty image
 # ============================================================
+
 
 def add_disk(arr: np.ndarray, cx: int, cy: int, r: int, value: float = 1.0) -> None:
     n = arr.shape[0]
@@ -516,9 +531,19 @@ def reconstruct_dirty_image(
     alpha = np.clip(count_factor, 0.0, 1.0)
 
     if educational_mode:
-        smooth_uv = blur_array(sparse_uv, passes=1 + int(6 * alpha))
-        filled_uv = (1.0 - alpha) * sparse_uv + alpha * smooth_uv
-        effective_uv = envelope * np.clip(filled_uv, 0.0, 1.0)
+        # Stronger outreach-oriented effect:
+        # as antenna number increases, holes in uv coverage are more visibly filled.
+        smooth_uv_1 = blur_array(sparse_uv, passes=1 + int(4 * alpha))
+        smooth_uv_2 = blur_array(sparse_uv, passes=4 + int(8 * alpha))
+
+        filled_uv = (
+            (1.0 - alpha) * sparse_uv
+            + 0.65 * alpha * smooth_uv_1
+            + 0.35 * alpha * smooth_uv_2
+        )
+
+        filled_uv = np.clip(filled_uv, 0.0, 1.0)
+        effective_uv = envelope * filled_uv
     else:
         effective_uv = envelope * sparse_uv
 
@@ -551,6 +576,7 @@ def reconstruct_dirty_image(
 # ============================================================
 # Scoring
 # ============================================================
+
 
 @dataclass
 class Scores:
@@ -594,10 +620,10 @@ def compute_scores(
     artifact_control = np.clip(100 * (0.75 * angle_score + 0.25 * radial_balance), 0, 100)
 
     weights = {
-        "Resolve distant galaxies": (0.50, 0.20, 0.05, 0.25),
-        "Observe extended hydrogen gas": (0.15, 0.20, 0.45, 0.20),
-        "Detect faint radio sources": (0.10, 0.50, 0.10, 0.30),
-        "Reduce fake patterns": (0.15, 0.20, 0.15, 0.50),
+        "遠くの銀河を細かく見る": (0.50, 0.20, 0.05, 0.25),
+        "広がった水素ガスを見る": (0.15, 0.20, 0.45, 0.20),
+        "暗い電波源を見つける": (0.10, 0.50, 0.10, 0.30),
+        "偽物の模様を減らす": (0.15, 0.20, 0.15, 0.50),
     }[mission]
 
     total = (
@@ -609,19 +635,19 @@ def compute_scores(
 
     weak = min(
         [
-            (resolution, "Weak at resolving fine structure. Increase the maximum baseline."),
-            (extended, "Weak at capturing extended structure. Add more short baselines in the core."),
-            (artifact_control, "The layout is anisotropic, so fake patterns are likely. Spread directions more evenly."),
-            (sensitivity, "Sensitivity to faint signals is insufficient. Increase the number of physical antennas."),
+            (resolution, "細かい構造を見る力が弱いです。最大基線を長くすると改善します。"),
+            (extended, "広がった構造に弱いです。中心部に短い基線を増やすと改善します。"),
+            (artifact_control, "配置の偏りが大きく、偽の模様が出やすいです。方向を分散させると改善します。"),
+            (sensitivity, "弱い信号への感度が不足しています。物理アンテナ数や有効集光面積を増やすと改善します。"),
         ],
         key=lambda x: x[0],
     )
 
     comment = weak[1]
     if total >= 82:
-        comment = "A well-balanced array for this mission."
+        comment = "このミッションに対して、かなりバランスのよい配置です。"
     elif total >= 65:
-        comment = "A reasonable configuration, but there is still a clear weakness. " + comment
+        comment = "まずまずの配置ですが、まだ明確な弱点があります。" + weak[1]
 
     return Scores(
         float(resolution),
@@ -637,7 +663,9 @@ def compute_scores(
 # Plotting
 # ============================================================
 
+
 def fig_layout(pos: np.ndarray, radius: float, unit: str) -> plt.Figure:
+    plot_unit = "km" if unit == "km" else "arb. unit"
     fig, ax = plt.subplots(figsize=(4, 4))
     circle = plt.Circle((0, 0), radius, fill=False, linestyle="--", linewidth=1.2)
     ax.add_patch(circle)
@@ -646,8 +674,8 @@ def fig_layout(pos: np.ndarray, radius: float, unit: str) -> plt.Figure:
     ax.set_xlim(-1.08 * radius, 1.08 * radius)
     ax.set_ylim(-1.08 * radius, 1.08 * radius)
     ax.set_title("Antenna / station layout")
-    ax.set_xlabel(f"East-West ({unit})")
-    ax.set_ylabel(f"North-South ({unit})")
+    ax.set_xlabel(f"East-West ({plot_unit})")
+    ax.set_ylabel(f"North-South ({plot_unit})")
     ax.grid(alpha=0.25)
     return fig
 
@@ -672,7 +700,7 @@ def fig_sky(sky: np.ndarray) -> plt.Figure:
 
 def fig_dirty(dirty: np.ndarray, display_mode: str, fixed_vmax: float) -> plt.Figure:
     fig, ax = plt.subplots(figsize=(4, 4))
-    if display_mode == "Auto contrast (show shape clearly)":
+    if display_mode == "自動コントラスト（形を見やすく）":
         img = robust_normalize(dirty, symmetric=True)
         ax.imshow(img, origin="upper", interpolation="nearest", vmin=-1, vmax=1)
     else:
@@ -702,33 +730,32 @@ def fmt(n: int) -> str:
 # Main UI
 # ============================================================
 
-st.title("SKA Interferometer Puzzle")
+st.title("SKA干渉計パズル")
 st.caption(
-    "An outreach app to explore how antenna layout and telescope specifications affect "
-    "uv coverage and a simplified dirty image."
+    "アンテナ配置や望遠鏡仕様を変えると、uv coverage と簡易 dirty image がどう変わるかを体験する展示用アプリです。"
 )
 
 with st.sidebar:
-    st.header("Settings")
+    st.header("設定")
 
-    st.subheader("Mission")
+    st.subheader("観測ミッション")
     mission = st.selectbox(
-        "Observation goal",
+        "観測の目的",
         [
-            "Resolve distant galaxies",
-            "Observe extended hydrogen gas",
-            "Detect faint radio sources",
-            "Reduce fake patterns",
+            "遠くの銀河を細かく見る",
+            "広がった水素ガスを見る",
+            "暗い電波源を見つける",
+            "偽物の模様を減らす",
         ],
         index=1,
     )
 
     st.divider()
-    st.subheader("Input image")
+    st.subheader("入力画像")
 
     sky_source = st.selectbox(
-        "Input mode",
-        ["Use a sample image", "Upload my own image"],
+        "入力モード",
+        ["サンプル画像を使う", "自分の画像をアップロード"],
         index=0,
     )
 
@@ -737,51 +764,51 @@ with st.sidebar:
     invert_uploaded = False
     threshold_uploaded = 0.0
     gamma_uploaded = 1.0
-    manual_rotation = "0° (no rotation)"
+    manual_rotation = "0°（そのまま）"
     keep_aspect = True
 
-    if sky_source == "Use a sample image":
+    if sky_source == "サンプル画像を使う":
         sample_model = st.selectbox(
-            "Sample image",
+            "サンプル画像",
             [
-                "Extended hydrogen gas + small galaxies",
-                "Many point sources",
-                "Bubble-like cosmic structure",
-                "SKA letters",
-                "Large disk + small points",
+                "広がった水素ガス + 小銀河",
+                "多数の点源",
+                "泡構造風の宇宙",
+                "SKAの文字",
+                "大きな円 + 小さな点",
             ],
-            index=0,
+            index=3,
         )
     else:
         uploaded_file = st.file_uploader(
-            "Upload an image file",
+            "画像ファイルをアップロード",
             type=["png", "jpg", "jpeg"],
         )
         manual_rotation = st.selectbox(
-            "Manual rotation correction",
-            ["0° (no rotation)", "90° clockwise", "180°", "90° counterclockwise"],
+            "アップロード画像の回転補正",
+            ["0°（そのまま）", "90° 時計回り", "180°", "90° 反時計回り"],
             index=0,
         )
-        keep_aspect = st.checkbox("Keep aspect ratio", value=True)
-        invert_uploaded = st.checkbox("Invert black/white", value=False)
-        threshold_uploaded = st.slider("Background threshold", 0.0, 0.8, 0.05, 0.01)
-        gamma_uploaded = st.slider("Gamma correction", 0.3, 3.0, 1.0, 0.1)
+        keep_aspect = st.checkbox("縦横比を保つ", value=True)
+        invert_uploaded = st.checkbox("白黒を反転する", value=False)
+        threshold_uploaded = st.slider("背景カット閾値", 0.0, 0.8, 0.05, 0.01)
+        gamma_uploaded = st.slider("ガンマ補正", 0.3, 3.0, 1.0, 0.1)
 
     st.divider()
-    st.subheader("Telescope specification")
+    st.subheader("望遠鏡仕様")
 
-    preset_name = st.selectbox("Preset", list(TELESCOPE_PRESETS.keys()), index=1)
+    preset_name = st.selectbox("プリセット", list(TELESCOPE_PRESETS.keys()), index=1)
     preset = TELESCOPE_PRESETS[preset_name]
 
     unit = st.selectbox(
-        "Distance unit",
-        ["km", "arbitrary unit"],
+        "距離単位",
+        ["km", "任意単位"],
         index=0 if preset["unit"] == "km" else 1,
         key=f"unit_{preset_name}",
     )
 
     actual_elements = st.number_input(
-        "Interferometric elements (stations / dishes)",
+        "干渉計要素数（station / dish 数）",
         min_value=2,
         max_value=200_000,
         value=int(preset["interferometric_elements"]),
@@ -789,7 +816,7 @@ with st.sidebar:
     )
 
     physical_antennas = st.number_input(
-        "Physical antennas",
+        "物理アンテナ数",
         min_value=2,
         max_value=500_000,
         value=int(preset["physical_antennas"]),
@@ -797,7 +824,7 @@ with st.sidebar:
     )
 
     max_baseline = st.number_input(
-        f"Maximum baseline ({unit})",
+        f"最大基線・最大分離（{unit}）",
         min_value=0.1,
         max_value=100_000.0,
         value=float(preset["max_baseline"]),
@@ -807,35 +834,35 @@ with st.sidebar:
     st.caption(str(preset["note"]))
 
     st.divider()
-    st.subheader("Image model parameters")
+    st.subheader("画像モデルの設定")
 
     signal_strength = st.slider(
-        "Signal strength",
+        "信号の強さ",
         0.01,
         2.0,
-        0.20,
+        0.50,
         0.01,
-        help="Lower values make the astronomical signal weaker, so it can disappear into noise.",
+        help="小さいほど天体信号が弱くなり、感度が低い場合にノイズに埋もれます。",
     )
 
     base_noise = st.slider(
-        "Base noise level",
+        "基準ノイズレベル",
         0.0,
         0.40,
-        0.18,
+        0.12,
         0.01,
-        help="This sets the reference noise before sensitivity improvement is applied.",
+        help="感度向上を適用する前の基準ノイズです。",
     )
 
     use_physical_sensitivity = st.checkbox(
-        "Use physical antenna count for sensitivity",
+        "物理アンテナ数を感度に反映する",
         value=True,
-        help="If on, changing the number of physical antennas changes the noise level.",
+        help="オンにすると、物理アンテナ数を変えたときにノイズレベルが変わります。",
     )
     sensitivity_elements = int(physical_antennas if use_physical_sensitivity else actual_elements)
 
     sensitivity_reference = st.number_input(
-        "Reference count for sensitivity scaling",
+        "感度スケーリングの基準数",
         min_value=2,
         max_value=500_000,
         value=512,
@@ -843,7 +870,7 @@ with st.sidebar:
     )
 
     sensitivity_effect_strength = st.slider(
-        "Sensitivity effect strength",
+        "感度効果の強さ",
         0.1,
         5.0,
         1.5,
@@ -851,16 +878,16 @@ with st.sidebar:
     )
 
     noise_floor_fraction = st.slider(
-        "Noise floor fraction",
+        "ノイズ下限",
         0.0,
         0.8,
         0.15,
         0.01,
-        help="Noise will not drop below this fraction of the base noise.",
+        help="ノイズは基準ノイズのこの割合より下には下がりません。",
     )
 
     coverage_reference_elements = st.number_input(
-        "Reference count for uv-filling scaling",
+        "uv充填スケーリングの基準要素数",
         min_value=2,
         max_value=500_000,
         value=512,
@@ -868,95 +895,95 @@ with st.sidebar:
     )
 
     count_effect_strength = st.slider(
-        "uv-filling effect strength",
+        "uv充填効果の強さ",
         0.0,
         2.5,
-        1.0,
+        2.0,
         0.1,
     )
 
     educational_mode = st.checkbox(
-        "Emphasize image differences (outreach mode)",
+        "画像変化を強調する（展示用）",
         value=True,
-        help="If on, increasing element count helps fill holes in uv coverage more visibly.",
+        help="オンにすると、要素数が増えたときにuv coverageの穴が埋まる効果を見えやすくします。",
     )
 
     st.divider()
-    st.subheader("Layout")
+    st.subheader("配置")
 
     layout_kind = st.selectbox(
-        "Layout type",
+        "配置タイプ",
         [
-            "Core concentrated",
-            "Long-baseline biased",
-            "Linear",
-            "Random",
-            "Three-arm",
-            "SKA-like balanced",
-            "Manual edit",
+            "中心集中型",
+            "長基線重視型",
+            "直線型",
+            "ランダム型",
+            "三本腕型",
+            "SKA風バランス型",
+            "手動編集",
         ],
         index=5 if "SKA" in preset_name else 3,
     )
 
-    seed = st.slider("Random seed", 0, 999, 42, 1)
+    seed = st.slider("乱数シード", 0, 999, 42, 1)
 
     auto_rep = st.checkbox(
-        "Automatically choose displayed representative elements",
+        "表示用の代表要素数を自動設定する",
         value=True,
-        help="Real arrays can be too large to draw directly, so a representative subset is displayed.",
+        help="実機の全要素をそのまま描くと重いため、代表点で表示します。",
     )
 
     display_cap = st.slider(
-        "Upper limit of representative elements",
+        "代表要素数の上限",
         8,
-        220,
+        512,
         int(preset["display_cap"]),
         1,
     )
 
     if auto_rep:
         n_rep = int(min(max(actual_elements, 4), display_cap))
-        st.caption(f"Current representative elements: {n_rep}")
+        st.caption(f"現在の代表要素数：{n_rep}")
     else:
         n_rep = st.slider(
-            "Representative elements",
+            "代表要素数",
             4,
-            int(min(max(actual_elements, 4), 220)),
+            int(min(max(actual_elements, 4), 512)),
             int(min(actual_elements, display_cap)),
             1,
         )
 
     use_density_bonus = st.checkbox(
-        "Let representative density slightly widen uv sample points",
+        "代表点の密度をuv点の太さにも少し反映する",
         value=True,
     )
     compression_ratio = max(float(actual_elements) / max(n_rep, 1), 1.0)
     density_bonus = int(np.clip(round(math.log2(compression_ratio) / 1.6), 0, 6)) if use_density_bonus else 0
 
     st.divider()
-    st.subheader("Display and comparison")
+    st.subheader("表示・比較設定")
 
-    grid = st.select_slider("Image size", options=[64, 96, 128, 160], value=128)
+    grid = st.select_slider("画像サイズ", options=[64, 96, 128, 160], value=128)
 
     reference_baseline = st.number_input(
-        f"Reference baseline for uv display ({unit})",
+        f"uv表示用の基準最大基線（{unit}）",
         min_value=0.1,
         max_value=100_000.0,
         value=150.0,
         step=1.0,
-        help="This changes the mapping of baselines onto the displayed uv plane.",
+        help="基線をuv平面上にどう表示するかを決める比較用の基準です。",
     )
 
-    uv_zoom = st.slider("uv display zoom", 0.5, 2.5, 1.0, 0.1)
-    point_radius = st.slider("Base uv point size", 1, 4, 2, 1)
-    zero_spacing_hint = st.checkbox("Add a small central hint", value=False)
-    show_true = st.checkbox("Also show the input image", value=True)
+    uv_zoom = st.slider("uv表示倍率", 0.5, 2.5, 1.0, 0.1)
+    point_radius = st.slider("uv点の基本サイズ", 1, 4, 2, 1)
+    zero_spacing_hint = st.checkbox("中心成分を少し補う（教育用）", value=False)
+    show_true = st.checkbox("入力画像も表示する", value=True)
 
     display_mode = st.selectbox(
-        "Dirty image display",
+        "dirty画像の表示",
         [
-            "Auto contrast (show shape clearly)",
-            "Fixed contrast (show brightness difference)",
+            "自動コントラスト（形を見やすく）",
+            "固定コントラスト（明るさの差を見やすく）",
         ],
         index=1,
     )
@@ -968,18 +995,18 @@ with st.sidebar:
 
 radius = max_baseline / 2.0
 
-if layout_kind == "Manual edit":
-    default = make_layout("SKA-like balanced", n_rep, radius, seed)
+if layout_kind == "手動編集":
+    default = make_layout("SKA風バランス型", n_rep, radius, seed)
     df = pd.DataFrame(default, columns=[f"x ({unit})", f"y ({unit})"])
-    st.subheader("Manual layout editor")
-    st.write("You can edit the x and y coordinates directly.")
+    st.subheader("手動配置エディタ")
+    st.write("x, y 座標を直接編集できます。")
     edited = st.data_editor(df, num_rows="fixed", use_container_width=True)
     pos = edited[[f"x ({unit})", f"y ({unit})"]].to_numpy(float)
     pos = clip_to_radius(pos, radius)
 else:
     pos = make_layout(layout_kind, n_rep, radius, seed)
 
-if sky_source == "Upload my own image" and uploaded_file is not None:
+if sky_source == "自分の画像をアップロード" and uploaded_file is not None:
     sky = load_uploaded_sky(
         uploaded_file=uploaded_file,
         n=grid,
@@ -990,7 +1017,7 @@ if sky_source == "Upload my own image" and uploaded_file is not None:
         keep_aspect=keep_aspect,
     )
 else:
-    model_to_use = sample_model if sample_model is not None else "Extended hydrogen gas + small galaxies"
+    model_to_use = sample_model if sample_model is not None else "SKAの文字"
     sky = make_sky(grid, model_to_use, seed + 100)
 
 sparse_uv, outside_fraction = make_sparse_uv_weight(
@@ -1052,46 +1079,45 @@ scores = compute_scores(
 # ============================================================
 
 st.markdown("---")
-st.subheader("0. Main quantities affecting the dirty image")
+st.subheader("0. dirty画像に効いている主な量")
 
 mcols = st.columns(11)
 with mcols[0]:
-    st.metric("Interferometric elements", fmt(actual_elements))
+    st.metric("干渉計要素", fmt(actual_elements))
 with mcols[1]:
-    st.metric("Physical antennas", fmt(physical_antennas))
+    st.metric("物理アンテナ", fmt(physical_antennas))
 with mcols[2]:
-    st.metric("Max baseline", f"{max_baseline:g} {unit}")
+    st.metric("最大基線", f"{max_baseline:g} {unit}")
 with mcols[3]:
-    st.metric("Representative elements", fmt(n_rep))
+    st.metric("代表要素数", fmt(n_rep))
 with mcols[4]:
-    st.metric("Signal strength", f"{signal_strength:.2f}")
+    st.metric("信号強度", f"{signal_strength:.2f}")
 with mcols[5]:
-    st.metric("uv-fill factor", f"{count_factor:.2f}")
+    st.metric("uv充填係数", f"{count_factor:.2f}")
 with mcols[6]:
-    st.metric("Sensitivity response", f"{sensitivity_response:.2f}")
+    st.metric("感度応答", f"{sensitivity_response:.2f}")
 with mcols[7]:
-    st.metric("S/N proxy", f"{snr_proxy:.2f}")
+    st.metric("S/N指標", f"{snr_proxy:.2f}")
 with mcols[8]:
-    st.metric("uv fill fraction", f"{100 * uv_fill:.2f}%")
+    st.metric("uv充填率", f"{100 * uv_fill:.2f}%")
 with mcols[9]:
-    st.metric("Effective noise", f"{effective_noise:.3f}")
+    st.metric("有効ノイズ", f"{effective_noise:.3f}")
 with mcols[10]:
-    st.metric("Dirty RMS", f"{dirty_rms:.3e}")
+    st.metric("dirty RMS", f"{dirty_rms:.3e}")
 
 st.caption(
-    "Image sharpness mainly depends on maximum baseline and layout. "
-    "Noise level mainly depends on physical antenna count. "
-    "Signal strength determines whether the source emerges above the noise."
+    "画像の細かさは主に最大基線と配置で決まり、ノイズは主に物理アンテナ数に依存します。"
+    "干渉計要素数を増やすと、主にuv coverageの穴が埋まり、偽物の模様が減ります。"
 )
 
 if outside_fraction > 0.05:
     st.warning(
-        f"About {100 * outside_fraction:.1f}% of uv sample points are outside the displayed uv range. "
-        "Increase the reference baseline or decrease the uv zoom if needed."
+        f"uv点の約 {100 * outside_fraction:.1f}% が表示範囲外です。"
+        "uv表示用の基準最大基線を大きくするか、uv表示倍率を下げると見やすくなります。"
     )
 
 st.markdown("---")
-st.subheader("1. Antenna layout and reconstructed image")
+st.subheader("1. アンテナ配置と再構成画像")
 
 if show_true:
     cols = st.columns(4)
@@ -1119,49 +1145,72 @@ else:
         st.pyplot(fig_dirty(dirty, display_mode, fixed_vmax), use_container_width=True)
 
 st.markdown("---")
-st.subheader("2. Telescope score")
+st.subheader("2. 望遠鏡スコア")
 
 scols = st.columns(4)
 with scols[0]:
-    metric_bar("Resolution", scores.resolution)
+    metric_bar("解像度", scores.resolution)
 with scols[1]:
-    metric_bar("Sensitivity", scores.sensitivity)
+    metric_bar("感度", scores.sensitivity)
 with scols[2]:
-    metric_bar("Extended-structure response", scores.extended)
+    metric_bar("広がった構造への強さ", scores.extended)
 with scols[3]:
-    metric_bar("Artifact control", scores.artifact_control)
+    metric_bar("偽模様の少なさ", scores.artifact_control)
 
-st.metric("Mission score", f"{scores.total:.0f} / 100")
+st.metric("ミッション達成度", f"{scores.total:.0f} / 100")
 st.info(scores.comment)
 
 st.markdown("---")
-st.subheader("3. What each setting actually changes")
+st.subheader("3. アンテナ数の効果を見せる推奨設定")
 
 st.write(
     """
-**Settings that change the image itself**
-- **Interferometric elements**: fills uv coverage and reduces fake patterns.
-- **Physical antennas**: changes sensitivity, so the noise level changes.
-- **Maximum baseline**: changes sharpness and accessible fine structure.
-- **Signal strength**: changes how visible the source is above noise.
-- **Layout type / manual layout**: changes the uv sampling pattern.
+アンテナ数、より正確には **干渉計要素数** の効果を見せたい場合は、次の設定が分かりやすいです。
 
-**Settings mainly for display or comparison**
-- **Reference baseline for uv display**
-- **uv display zoom**
-- **Base uv point size**
-- **Auto/fixed contrast**
-- **Representative element cap**
+- **入力画像**：SKAの文字
+- **dirty画像の表示**：固定コントラスト
+- **信号の強さ**：0.5
+- **基準ノイズレベル**：0.12
+- **配置タイプ**：ランダム型、またはSKA風バランス型
+- **最大基線**：100〜150 km
+- **uv充填効果の強さ**：2.0
+
+そのうえで、
+
+- **干渉計要素数**：8 → 16 → 32 → 64 → 128 → 256 → 512
+
+と変化させてください。少数ではuv coverageが疎で偽模様が出やすく、多数ではuv coverageが埋まり、再構成画像が安定していく様子が見えます。
 """
 )
 
-with st.expander("Expert note"):
+st.markdown("---")
+st.subheader("4. 各設定が何に効くか")
+
+st.write(
+    """
+**画像そのものに効く設定**
+- **干渉計要素数**：uv coverageを埋め、偽物の模様を減らす。
+- **物理アンテナ数**：感度を上げ、ノイズを減らす。
+- **最大基線**：解像度を上げ、細かい構造を見えるようにする。
+- **信号の強さ**：天体信号がノイズの上に現れるかどうかを決める。
+- **配置タイプ / 手動配置**：uv sampling patternを変える。
+
+**主に表示や比較のための設定**
+- **uv表示用の基準最大基線**
+- **uv表示倍率**
+- **uv点の基本サイズ**
+- **自動 / 固定コントラスト**
+- **代表要素数の上限**
+"""
+)
+
+with st.expander("専門家向けメモ"):
     st.write(
         f"""
-This app is not a precision radio interferometric imaging code.
-It combines sparse baseline sampling with an educational Fourier envelope and a simplified noise model.
+このアプリは、厳密な電波干渉計イメージングコードではありません。
+疎な baseline sampling、最大基線に対応する教育用 Fourier envelope、簡略化したノイズモデルを組み合わせています。
 
-Current internal values:
+現在の内部量：
 - preset: {preset_name}
 - layout: {layout_kind}
 - input mode: {sky_source}
@@ -1186,4 +1235,4 @@ Current internal values:
 """
     )
 
-st.caption("Educational prototype for SKA outreach.")
+st.caption("SKAアウトリーチ用の教育プロトタイプです。")
