@@ -1,21 +1,22 @@
 """
-SKA Interferometer Puzzle — Streamlit app
+SKA Interferometer Puzzle — Simplified Streamlit app
 
 Run:
     pip install streamlit numpy matplotlib pandas pillow
     streamlit run app.py
 
 Purpose:
-    Educational outreach app showing how antenna layout and telescope specifications
-    affect uv coverage and a simplified dirty image.
+    Educational outreach app showing how interferometric element count,
+    maximum baseline, and antenna layout affect uv coverage and a simplified
+    dirty image.
 
 Important:
     This is an outreach-oriented educational simulator, not a precision radio
     interferometric imaging pipeline.
 
-Language policy in this version:
+Language policy:
     - Matplotlib figure labels are in English to avoid font rendering issues online.
-    - Streamlit UI and explanatory text are in Japanese.
+    - Streamlit UI and explanations are in Japanese.
 """
 
 from __future__ import annotations
@@ -49,38 +50,33 @@ st.set_page_config(
 TELESCOPE_PRESETS: Dict[str, Dict[str, object]] = {
     "教育用ミニ干渉計": {
         "interferometric_elements": 16,
-        "physical_antennas": 16,
         "max_baseline": 20.0,
-        "unit": "km",
         "display_cap": 64,
-        "note": "展示用の小さな仮想配列です。実機仕様ではありません。",
+        "physical_info": "仮想的な小型配列。実機仕様ではありません。",
     },
     "SKA-Lowスケール": {
         "interferometric_elements": 512,
-        "physical_antennas": 131_072,
         "max_baseline": 74.0,
-        "unit": "km",
         "display_cap": 128,
-        "note": (
-            "低周波用の想定です。131,072本の物理アンテナを512 stationにまとめ、"
-            "station中心を干渉計要素として扱います。"
+        "physical_info": (
+            "SKA-Lowでは、131,072本の低周波アンテナが512 stationにまとめられます。"
+            "このアプリでは、画像再構成に効く干渉計要素としてstation数を扱います。"
         ),
     },
     "SKA-Midスケール": {
         "interferometric_elements": 197,
-        "physical_antennas": 197,
         "max_baseline": 150.0,
-        "unit": "km",
         "display_cap": 128,
-        "note": "中周波用の想定です。197台のディッシュを干渉計要素として扱います。",
+        "physical_info": (
+            "SKA-Midでは、197台のディッシュを干渉計要素として扱います。"
+            "このアプリでは、その配置と基線長が画像再構成にどう効くかを示します。"
+        ),
     },
     "カスタム": {
         "interferometric_elements": 64,
-        "physical_antennas": 64,
-        "max_baseline": 40.0,
-        "unit": "km",
+        "max_baseline": 100.0,
         "display_cap": 128,
-        "note": "任意の望遠鏡仕様を入力できます。",
+        "physical_info": "任意の干渉計要素数と最大基線を入力できます。",
     },
 }
 
@@ -106,10 +102,7 @@ def robust_normalize(img: np.ndarray, symmetric: bool = False) -> np.ndarray:
 
 
 def blur_array(arr: np.ndarray, passes: int = 2) -> np.ndarray:
-    """
-    Simple dependency-free blur for educational uv filling display.
-    This is not a physical gridding kernel.
-    """
+    """Simple dependency-free blur for educational uv filling display."""
     out = np.asarray(arr, dtype=float)
 
     for _ in range(max(0, passes)):
@@ -139,7 +132,7 @@ def uv_count_factor(elements: int, reference_elements: int, strength: float = 2.
     """
     Convert interferometric element count to a 0-1 factor for uv filling.
 
-    This version is deliberately tuned for outreach:
+    This is intentionally tuned for outreach:
     increasing the element count should visibly fill the uv plane.
     """
     n = max(float(elements), 2.0)
@@ -153,31 +146,6 @@ def uv_count_factor(elements: int, reference_elements: int, strength: float = 2.
 
     response = x ** (1.0 / max(strength, 1e-6))
     return float(np.clip(response, 0.0, 1.0))
-
-
-def effective_noise_from_count(
-    elements: int,
-    reference_elements: int,
-    base_noise: float,
-    floor_fraction: float = 0.15,
-    strength: float = 1.5,
-) -> Tuple[float, float]:
-    """
-    Convert physical antenna count to effective noise using nonlinear scaling + noise floor.
-
-    Returns:
-        effective_noise, sensitivity_response
-    """
-    n = max(float(elements), 2.0)
-    ref = max(float(reference_elements), 2.0)
-
-    x = np.log10(n / ref + 1.0)
-    response = 1.0 - np.exp(-strength * x)
-
-    noise_floor = base_noise * floor_fraction
-    effective_noise = base_noise - (base_noise - noise_floor) * response
-
-    return float(effective_noise), float(np.clip(response, 0.0, 1.0))
 
 
 def gaussian_2d(
@@ -240,16 +208,19 @@ def make_sky(n: int, model: str, seed: int) -> np.ndarray:
         sky -= sky.min()
 
     elif model == "SKAの文字":
+        # S
         sky += gaussian_2d(n, -0.55, 0.45, 0.16, 0.08, amp=0.9)
         sky += gaussian_2d(n, -0.60, 0.15, 0.10, 0.08, amp=0.9)
         sky += gaussian_2d(n, -0.50, -0.15, 0.10, 0.08, amp=0.9)
         sky += gaussian_2d(n, -0.60, -0.45, 0.16, 0.08, amp=0.9)
 
+        # K
         for t in np.linspace(-0.55, 0.55, 12):
             sky += gaussian_2d(n, -0.05, t, 0.02, 0.02, amp=0.9)
         for t in np.linspace(-0.45, 0.45, 12):
             sky += gaussian_2d(n, 0.12 + 0.25 * abs(t), t, 0.02, 0.02, amp=0.9)
 
+        # A
         for t in np.linspace(-0.5, 0.5, 18):
             y = -0.5 + t
             sky += gaussian_2d(n, 0.55 - 0.25 * t, y, 0.02, 0.02, amp=0.9)
@@ -328,7 +299,7 @@ def load_uploaded_sky(
         arr[arr < threshold] = 0.0
 
     gamma = max(gamma, 1e-6)
-    arr = arr ** gamma
+    arr = arr**gamma
 
     arr -= arr.min()
     if arr.max() > 0:
@@ -430,14 +401,13 @@ def make_sparse_uv_weight(
     reference_baseline: float,
     uv_zoom: float,
     point_radius: int,
-    density_bonus: int,
     include_zero_spacing_hint: bool,
 ) -> Tuple[np.ndarray, float]:
     bl = baselines(pos)
     weight = np.zeros((grid, grid), dtype=float)
     c = grid // 2
     scale = (0.45 * grid * uv_zoom) / max(reference_baseline, 1e-12)
-    r_pix = max(1, int(point_radius + density_bonus))
+    r_pix = max(1, int(point_radius))
     outside = 0
 
     for u, v in bl:
@@ -489,29 +459,22 @@ def reconstruct_dirty_image(
     sky: np.ndarray,
     sparse_uv: np.ndarray,
     envelope: np.ndarray,
-    educational_mode: bool,
     base_noise: float,
-    sensitivity_elements: int,
-    sensitivity_reference: int,
+    signal_strength: float,
     interferometric_elements: int,
     coverage_reference_elements: int,
     count_effect_strength: float,
-    noise_floor_fraction: float,
-    sensitivity_effect_strength: float,
-    signal_strength: float,
+    educational_mode: bool,
     seed: int,
-) -> Tuple[np.ndarray, np.ndarray, float, float, float, float]:
+) -> Tuple[np.ndarray, np.ndarray, float, float]:
     """
     Returns:
-        dirty, effective_uv, effective_noise, count_factor, sensitivity_response, snr_proxy
+        dirty, effective_uv, count_factor, snr_proxy
     """
     rng = np.random.default_rng(seed)
 
-    # Reference sky used to set the noise scale
     sky_ref = sky - np.mean(sky)
     ft_ref = np.fft.fftshift(np.fft.fft2(sky_ref))
-
-    # Actual astronomical signal entering the telescope
     ft_signal = signal_strength * ft_ref
 
     count_factor = uv_count_factor(
@@ -519,40 +482,27 @@ def reconstruct_dirty_image(
         reference_elements=coverage_reference_elements,
         strength=count_effect_strength,
     )
-
-    effective_noise, sensitivity_response = effective_noise_from_count(
-        elements=sensitivity_elements,
-        reference_elements=sensitivity_reference,
-        base_noise=base_noise,
-        floor_fraction=noise_floor_fraction,
-        strength=sensitivity_effect_strength,
-    )
-
     alpha = np.clip(count_factor, 0.0, 1.0)
 
     if educational_mode:
-        # Stronger outreach-oriented effect:
-        # as antenna number increases, holes in uv coverage are more visibly filled.
+        # Outreach-oriented effect:
+        # low element count -> sparse uv coverage;
+        # high element count -> visibly fuller uv coverage.
         smooth_uv_1 = blur_array(sparse_uv, passes=1 + int(4 * alpha))
         smooth_uv_2 = blur_array(sparse_uv, passes=4 + int(8 * alpha))
-
         filled_uv = (
             (1.0 - alpha) * sparse_uv
             + 0.65 * alpha * smooth_uv_1
             + 0.35 * alpha * smooth_uv_2
         )
-
-        filled_uv = np.clip(filled_uv, 0.0, 1.0)
-        effective_uv = envelope * filled_uv
+        effective_uv = envelope * np.clip(filled_uv, 0.0, 1.0)
     else:
         effective_uv = envelope * sparse_uv
 
     sampled = ft_signal * effective_uv
 
-    # Noise is based on the unscaled reference sky,
-    # so lowering signal_strength lowers the signal only.
-    if effective_noise > 0:
-        amp = np.percentile(np.abs(ft_ref), 95) * effective_noise
+    if base_noise > 0:
+        amp = np.percentile(np.abs(ft_ref), 95) * base_noise
         noise = amp * (rng.normal(size=ft_ref.shape) + 1j * rng.normal(size=ft_ref.shape))
         sampled += noise * effective_uv
 
@@ -560,17 +510,10 @@ def reconstruct_dirty_image(
     dirty -= np.mean(dirty)
 
     signal_rms = float(np.std(signal_strength * sky_ref))
-    noise_rms_proxy = float(effective_noise * np.std(sky_ref))
+    noise_rms_proxy = float(base_noise * np.std(sky_ref))
     snr_proxy = signal_rms / max(noise_rms_proxy, 1e-9)
 
-    return (
-        dirty,
-        effective_uv,
-        float(effective_noise),
-        float(count_factor),
-        float(sensitivity_response),
-        float(snr_proxy),
-    )
+    return dirty, effective_uv, float(count_factor), float(snr_proxy)
 
 
 # ============================================================
@@ -581,7 +524,7 @@ def reconstruct_dirty_image(
 @dataclass
 class Scores:
     resolution: float
-    sensitivity: float
+    uv_coverage: float
     extended: float
     artifact_control: float
     total: float
@@ -599,18 +542,14 @@ def compute_scores(
     pos: np.ndarray,
     radius: float,
     mission: str,
-    sensitivity_elements: int,
-    sensitivity_reference: int,
+    count_factor: float,
 ) -> Scores:
     bl = baselines(pos)
     length = np.hypot(bl[:, 0], bl[:, 1])
     max_possible = max(2 * radius, 1e-12)
 
     resolution = np.clip(100 * np.max(length) / max_possible, 0, 100)
-
-    sens_ratio = np.sqrt(max(sensitivity_elements, 2) / max(sensitivity_reference, 2))
-    sensitivity = np.clip(100 * sens_ratio, 0, 100)
-
+    uv_coverage = np.clip(100 * count_factor, 0, 100)
     extended = np.clip(100 * np.mean(length < 0.35 * radius) / 0.45, 0, 100)
 
     angle = np.mod(np.arctan2(bl[:, 1], bl[:, 0]), np.pi)
@@ -622,13 +561,13 @@ def compute_scores(
     weights = {
         "遠くの銀河を細かく見る": (0.50, 0.20, 0.05, 0.25),
         "広がった水素ガスを見る": (0.15, 0.20, 0.45, 0.20),
-        "暗い電波源を見つける": (0.10, 0.50, 0.10, 0.30),
-        "偽物の模様を減らす": (0.15, 0.20, 0.15, 0.50),
+        "暗い電波源を見つける": (0.20, 0.35, 0.10, 0.35),
+        "偽物の模様を減らす": (0.15, 0.40, 0.05, 0.40),
     }[mission]
 
     total = (
         weights[0] * resolution
-        + weights[1] * sensitivity
+        + weights[1] * uv_coverage
         + weights[2] * extended
         + weights[3] * artifact_control
     )
@@ -636,9 +575,9 @@ def compute_scores(
     weak = min(
         [
             (resolution, "細かい構造を見る力が弱いです。最大基線を長くすると改善します。"),
+            (uv_coverage, "uv coverageが疎です。干渉計要素数を増やすと改善します。"),
             (extended, "広がった構造に弱いです。中心部に短い基線を増やすと改善します。"),
             (artifact_control, "配置の偏りが大きく、偽の模様が出やすいです。方向を分散させると改善します。"),
-            (sensitivity, "弱い信号への感度が不足しています。物理アンテナ数や有効集光面積を増やすと改善します。"),
         ],
         key=lambda x: x[0],
     )
@@ -651,7 +590,7 @@ def compute_scores(
 
     return Scores(
         float(resolution),
-        float(sensitivity),
+        float(uv_coverage),
         float(extended),
         float(artifact_control),
         float(total),
@@ -747,7 +686,7 @@ with st.sidebar:
             "暗い電波源を見つける",
             "偽物の模様を減らす",
         ],
-        index=1,
+        index=3,
     )
 
     st.divider()
@@ -803,7 +742,7 @@ with st.sidebar:
     unit = st.selectbox(
         "距離単位",
         ["km", "任意単位"],
-        index=0 if preset["unit"] == "km" else 1,
+        index=0,
         key=f"unit_{preset_name}",
     )
 
@@ -815,14 +754,6 @@ with st.sidebar:
         step=1,
     )
 
-    physical_antennas = st.number_input(
-        "物理アンテナ数",
-        min_value=2,
-        max_value=500_000,
-        value=int(preset["physical_antennas"]),
-        step=1,
-    )
-
     max_baseline = st.number_input(
         f"最大基線・最大分離（{unit}）",
         min_value=0.1,
@@ -831,7 +762,7 @@ with st.sidebar:
         step=1.0,
     )
 
-    st.caption(str(preset["note"]))
+    st.caption(str(preset["physical_info"]))
 
     st.divider()
     st.subheader("画像モデルの設定")
@@ -842,7 +773,7 @@ with st.sidebar:
         2.0,
         0.50,
         0.01,
-        help="小さいほど天体信号が弱くなり、感度が低い場合にノイズに埋もれます。",
+        help="小さいほど天体信号が弱くなり、ノイズに埋もれやすくなります。",
     )
 
     base_noise = st.slider(
@@ -851,39 +782,7 @@ with st.sidebar:
         0.40,
         0.12,
         0.01,
-        help="感度向上を適用する前の基準ノイズです。",
-    )
-
-    use_physical_sensitivity = st.checkbox(
-        "物理アンテナ数を感度に反映する",
-        value=True,
-        help="オンにすると、物理アンテナ数を変えたときにノイズレベルが変わります。",
-    )
-    sensitivity_elements = int(physical_antennas if use_physical_sensitivity else actual_elements)
-
-    sensitivity_reference = st.number_input(
-        "感度スケーリングの基準数",
-        min_value=2,
-        max_value=500_000,
-        value=512,
-        step=1,
-    )
-
-    sensitivity_effect_strength = st.slider(
-        "感度効果の強さ",
-        0.1,
-        5.0,
-        1.5,
-        0.1,
-    )
-
-    noise_floor_fraction = st.slider(
-        "ノイズ下限",
-        0.0,
-        0.8,
-        0.15,
-        0.01,
-        help="ノイズは基準ノイズのこの割合より下には下がりません。",
+        help="この値を大きくすると、再構成画像にノイズが強く出ます。",
     )
 
     coverage_reference_elements = st.number_input(
@@ -892,6 +791,7 @@ with st.sidebar:
         max_value=500_000,
         value=512,
         step=1,
+        help="この値に近づくほど、uv coverageが埋まるように表示します。",
     )
 
     count_effect_strength = st.slider(
@@ -900,6 +800,7 @@ with st.sidebar:
         2.5,
         2.0,
         0.1,
+        help="大きくすると、干渉計要素数を増やしたときの変化が見えやすくなります。",
     )
 
     educational_mode = st.checkbox(
@@ -952,13 +853,6 @@ with st.sidebar:
             int(min(actual_elements, display_cap)),
             1,
         )
-
-    use_density_bonus = st.checkbox(
-        "代表点の密度をuv点の太さにも少し反映する",
-        value=True,
-    )
-    compression_ratio = max(float(actual_elements) / max(n_rep, 1), 1.0)
-    density_bonus = int(np.clip(round(math.log2(compression_ratio) / 1.6), 0, 6)) if use_density_bonus else 0
 
     st.divider()
     st.subheader("表示・比較設定")
@@ -1026,7 +920,6 @@ sparse_uv, outside_fraction = make_sparse_uv_weight(
     reference_baseline=reference_baseline,
     uv_zoom=uv_zoom,
     point_radius=point_radius,
-    density_bonus=density_bonus,
     include_zero_spacing_hint=zero_spacing_hint,
 )
 
@@ -1038,20 +931,16 @@ envelope = make_baseline_envelope(
     include_zero_spacing_hint=zero_spacing_hint,
 )
 
-dirty, effective_uv, effective_noise, count_factor, sensitivity_response, snr_proxy = reconstruct_dirty_image(
+dirty, effective_uv, count_factor, snr_proxy = reconstruct_dirty_image(
     sky=sky,
     sparse_uv=sparse_uv,
     envelope=envelope,
-    educational_mode=educational_mode,
     base_noise=base_noise,
-    sensitivity_elements=sensitivity_elements,
-    sensitivity_reference=int(sensitivity_reference),
+    signal_strength=float(signal_strength),
     interferometric_elements=int(actual_elements),
     coverage_reference_elements=int(coverage_reference_elements),
     count_effect_strength=float(count_effect_strength),
-    noise_floor_fraction=float(noise_floor_fraction),
-    sensitivity_effect_strength=float(sensitivity_effect_strength),
-    signal_strength=float(signal_strength),
+    educational_mode=educational_mode,
     seed=seed + 200,
 )
 
@@ -1069,8 +958,7 @@ scores = compute_scores(
     pos=pos,
     radius=radius,
     mission=mission,
-    sensitivity_elements=sensitivity_elements,
-    sensitivity_reference=int(sensitivity_reference),
+    count_factor=count_factor,
 )
 
 
@@ -1081,33 +969,28 @@ scores = compute_scores(
 st.markdown("---")
 st.subheader("0. dirty画像に効いている主な量")
 
-mcols = st.columns(11)
+mcols = st.columns(9)
 with mcols[0]:
     st.metric("干渉計要素", fmt(actual_elements))
 with mcols[1]:
-    st.metric("物理アンテナ", fmt(physical_antennas))
-with mcols[2]:
     st.metric("最大基線", f"{max_baseline:g} {unit}")
-with mcols[3]:
+with mcols[2]:
     st.metric("代表要素数", fmt(n_rep))
-with mcols[4]:
+with mcols[3]:
     st.metric("信号強度", f"{signal_strength:.2f}")
+with mcols[4]:
+    st.metric("基準ノイズ", f"{base_noise:.2f}")
 with mcols[5]:
     st.metric("uv充填係数", f"{count_factor:.2f}")
 with mcols[6]:
-    st.metric("感度応答", f"{sensitivity_response:.2f}")
-with mcols[7]:
     st.metric("S/N指標", f"{snr_proxy:.2f}")
-with mcols[8]:
+with mcols[7]:
     st.metric("uv充填率", f"{100 * uv_fill:.2f}%")
-with mcols[9]:
-    st.metric("有効ノイズ", f"{effective_noise:.3f}")
-with mcols[10]:
+with mcols[8]:
     st.metric("dirty RMS", f"{dirty_rms:.3e}")
 
 st.caption(
-    "画像の細かさは主に最大基線と配置で決まり、ノイズは主に物理アンテナ数に依存します。"
-    "干渉計要素数を増やすと、主にuv coverageの穴が埋まり、偽物の模様が減ります。"
+    "画像の細かさは主に最大基線と配置で決まり、干渉計要素数を増やすとuv coverageの穴が埋まり、偽物の模様が減ります。"
 )
 
 if outside_fraction > 0.05:
@@ -1151,7 +1034,7 @@ scols = st.columns(4)
 with scols[0]:
     metric_bar("解像度", scores.resolution)
 with scols[1]:
-    metric_bar("感度", scores.sensitivity)
+    metric_bar("uv coverage", scores.uv_coverage)
 with scols[2]:
     metric_bar("広がった構造への強さ", scores.extended)
 with scols[3]:
@@ -1190,17 +1073,14 @@ st.write(
     """
 **画像そのものに効く設定**
 - **干渉計要素数**：uv coverageを埋め、偽物の模様を減らす。
-- **物理アンテナ数**：感度を上げ、ノイズを減らす。
 - **最大基線**：解像度を上げ、細かい構造を見えるようにする。
-- **信号の強さ**：天体信号がノイズの上に現れるかどうかを決める。
 - **配置タイプ / 手動配置**：uv sampling patternを変える。
+- **信号の強さ**：天体信号がノイズの上に現れるかどうかを決める。
+- **基準ノイズレベル**：信号の見えにくさを変える。
 
-**主に表示や比較のための設定**
-- **uv表示用の基準最大基線**
-- **uv表示倍率**
-- **uv点の基本サイズ**
-- **自動 / 固定コントラスト**
-- **代表要素数の上限**
+**説明として残したもの**
+- SKA-Lowの131,072本の物理アンテナは、512 stationにまとめられます。
+- このアプリでは、画像再構成に直接効く要素としてstation/dish数を操作します。
 """
 )
 
@@ -1216,20 +1096,14 @@ with st.expander("専門家向けメモ"):
 - input mode: {sky_source}
 - signal strength: {signal_strength:.3f}
 - actual interferometric elements: {fmt(actual_elements)}
-- physical antennas: {fmt(physical_antennas)}
-- sensitivity elements used: {fmt(sensitivity_elements)}
 - max baseline: {max_baseline:g} {unit}
 - representative elements: {fmt(n_rep)}
 - representative max baseline: {rep_max_baseline:g} {unit}
-- density bonus: {density_bonus}
 - uv count factor: {count_factor:.4f}
-- sensitivity response: {sensitivity_response:.4f}
 - coverage reference elements: {fmt(coverage_reference_elements)}
-- sensitivity reference elements: {fmt(sensitivity_reference)}
-- noise floor fraction: {noise_floor_fraction:.3f}
 - uv filling fraction: {100 * uv_fill:.3f}%
 - uv outside fraction: {100 * outside_fraction:.3f}%
-- effective noise: {effective_noise:.4f}
+- base noise: {base_noise:.4f}
 - S/N proxy: {snr_proxy:.4f}
 - dirty image RMS: {dirty_rms:.4e}
 """
