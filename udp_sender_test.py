@@ -5,6 +5,7 @@ Run examples:
     python udp_sender_test.py
     python udp_sender_test.py --rows 8 --cols 8 --interval 0.2 --mode random
     python udp_sender_test.py --packet "10100100 10100111 11101100"
+    python udp_sender_test.py --rows 8 --cols 8 --interval 0.2 --mode moving --count 3
 """
 
 from __future__ import annotations
@@ -47,6 +48,7 @@ def main() -> None:
     parser.add_argument('--interval', type=float, default=0.2)
     parser.add_argument('--mode', choices=['moving', 'random'], default='moving')
     parser.add_argument('--packet', default=None, help='Send this one packet repeatedly.')
+    parser.add_argument('--count', type=int, default=0, help='Number of packets to send. 0 means run until Ctrl+C.')
     args = parser.parse_args()
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -63,6 +65,8 @@ def main() -> None:
             sock.sendto(packet.encode('ascii'), (args.host, args.port))
             print(packet)
             step += 1
+            if args.count > 0 and step >= args.count:
+                break
             time.sleep(args.interval)
     except KeyboardInterrupt:
         print('Stopped.')

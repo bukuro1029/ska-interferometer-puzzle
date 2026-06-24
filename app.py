@@ -112,6 +112,22 @@ def robust_normalize(img: np.ndarray, symmetric: bool = False) -> np.ndarray:
     return np.clip((arr - lo) / (hi - lo), 0.0, 1.0)
 
 
+def asinh_stretch_signed(
+    arr: np.ndarray,
+    contrast_percentile: float = 99.0,
+    stretch: float = 4.0,
+    scale: Optional[float] = None,
+) -> np.ndarray:
+    """Signed asinh stretch for dirty images with positive and negative sidelobes."""
+    data = np.asarray(arr, dtype=float)
+    if scale is None:
+        scale = float(np.percentile(np.abs(data), contrast_percentile))
+    scale = max(float(scale), 1e-12)
+    stretch = max(float(stretch), 1e-6)
+    out = np.arcsinh(stretch * data / scale) / np.arcsinh(stretch)
+    return np.clip(out, -1.0, 1.0)
+
+
 def blur_array(arr: np.ndarray, passes: int = 2) -> np.ndarray:
     """Simple dependency-free blur for educational uv filling display."""
     out = np.asarray(arr, dtype=float)
@@ -393,7 +409,7 @@ def load_grid_mapping(
     max_baseline: float,
 ) -> Tuple[pd.DataFrame, str, Optional[str]]:
     """Load grid mapping from uploaded CSV or local CSV path. Fallback to default mapping."""
-    required = {"row", "col", "x", "y"}
+    required = {"row", "col", "x", "y", "enabled"}
 
     try:
         if uploaded_mapping is not None:
@@ -421,8 +437,6 @@ def load_grid_mapping(
         df["col"] = df["col"].astype(int)
         df["x"] = df["x"].astype(float)
         df["y"] = df["y"].astype(float)
-        if "enabled" not in df.columns:
-            df["enabled"] = 1
         df = df[df["enabled"].astype(int) != 0]
         return df, source, None
     except Exception as exc:  # noqa: BLE001
@@ -458,9 +472,14 @@ def get_udp_socket(host: str, port: int) -> socket.socket:
     return sock
 
 
-def read_latest_udp_packet(sock: socket.socket, max_packets: int = 100) -> Tuple[Optional[str], int, Optional[str]]:
-    """Read all currently available UDP packets and return only the latest one."""
-    latest: Optional[str] = None
+def read_latest_udp_packet(
+    sock: socket.socket,
+    max_packets: int = 100,
+) -> Tuple[Optional[str], int, Optional[str], Optional[str], Optional[str]]:
+    """Read available UDP packets and return the latest valid packet plus raw status."""
+    latest_valid: Optional[str] = None
+    latest_raw: Optional[str] = None
+    latest_error: Optional[str] = None
     count = 0
     last_addr: Optional[str] = None
 
@@ -471,11 +490,17 @@ def read_latest_udp_packet(sock: socket.socket, max_packets: int = 100) -> Tuple
             break
         except OSError:
             break
-        latest = data.decode("ascii", errors="replace").strip()
+        latest_raw = data.decode("ascii", errors="replace").strip()
         count += 1
         last_addr = f"{addr[0]}:{addr[1]}"
+        _, _, _, normalized, parse_error = parse_contact_packet(latest_raw)
+        if parse_error is None:
+            latest_valid = normalized
+            latest_error = None
+        else:
+            latest_error = f"{parse_error} 受信パケット: {normalize_packet_text(latest_raw)}"
 
-    return latest, count, last_addr
+    return latest_valid, count, last_addr, latest_raw, latest_error
 
 
 def safe_rerun() -> None:
@@ -640,6 +665,7 @@ def make_baseline_envelope(
     return envelope
 
 
+@st.cache_data(show_spinner=False, max_entries=16)
 def reconstruct_dirty_image(
     sky: np.ndarray,
     sparse_uv: np.ndarray,
@@ -649,7 +675,7 @@ def reconstruct_dirty_image(
     interferometric_elements: int,
     coverage_reference_elements: int,
     count_effect_strength: float,
-    educational_mode: bool,
+    uv_effect_mode: str,
     seed: int,
 ) -> Tuple[np.ndarray, np.ndarray, float, float]:
     """
@@ -669,10 +695,7 @@ def reconstruct_dirty_image(
     )
     alpha = np.clip(count_factor, 0.0, 1.0)
 
-    if educational_mode:
-        # Outreach-oriented effect:
-        # low element count -> sparse uv coverage;
-        # high element count -> visibly fuller uv coverage.
+    if uv_effect_mode == "要素数差を強調":
         smooth_uv_1 = blur_array(sparse_uv, passes=1 + int(4 * alpha))
         smooth_uv_2 = blur_array(sparse_uv, passes=4 + int(8 * alpha))
         filled_uv = (
@@ -680,6 +703,10 @@ def reconstruct_dirty_image(
             + 0.65 * alpha * smooth_uv_1
             + 0.35 * alpha * smooth_uv_2
         )
+        effective_uv = envelope * np.clip(filled_uv, 0.0, 1.0)
+    elif uv_effect_mode == "配置差を強調":
+        subtle_uv = blur_array(sparse_uv, passes=1 + int(2 * alpha))
+        filled_uv = (1.0 - 0.25 * alpha) * sparse_uv + 0.25 * alpha * subtle_uv
         effective_uv = envelope * np.clip(filled_uv, 0.0, 1.0)
     else:
         effective_uv = envelope * sparse_uv
@@ -826,19 +853,28 @@ def fig_sky(sky: np.ndarray) -> plt.Figure:
     return fig
 
 
-def fig_dirty(dirty: np.ndarray, display_mode: str, fixed_vmax: float) -> plt.Figure:
+def fig_dirty(
+    dirty: np.ndarray,
+    display_mode: str,
+    fixed_vmax: float,
+    contrast_percentile: float,
+    stretch: float,
+    cmap: str,
+) -> plt.Figure:
     fig, ax = plt.subplots(figsize=(4, 4))
     if display_mode == "自動コントラスト（形を見やすく）":
-        img = robust_normalize(dirty, symmetric=True)
-        ax.imshow(img, origin="upper", interpolation="nearest", vmin=-1, vmax=1)
-    else:
-        ax.imshow(
+        img = asinh_stretch_signed(
             dirty,
-            origin="upper",
-            interpolation="nearest",
-            vmin=-fixed_vmax,
-            vmax=fixed_vmax,
+            contrast_percentile=contrast_percentile,
+            stretch=stretch,
         )
+    else:
+        img = asinh_stretch_signed(
+            dirty,
+            stretch=stretch,
+            scale=fixed_vmax,
+        )
+    ax.imshow(img, origin="upper", interpolation="nearest", vmin=-1, vmax=1, cmap=cmap)
     ax.set_title("Reconstructed image (dirty image)")
     ax.set_xticks([])
     ax.set_yticks([])
@@ -860,8 +896,12 @@ def fmt(n: int) -> str:
 
 if "last_udp_packet" not in st.session_state:
     st.session_state.last_udp_packet = ""
+if "last_udp_raw_packet" not in st.session_state:
+    st.session_state.last_udp_raw_packet = ""
 if "last_udp_time" not in st.session_state:
     st.session_state.last_udp_time = None
+if "last_udp_raw_time" not in st.session_state:
+    st.session_state.last_udp_raw_time = None
 if "last_udp_addr" not in st.session_state:
     st.session_state.last_udp_addr = None
 if "last_udp_count" not in st.session_state:
@@ -1004,7 +1044,7 @@ with st.sidebar:
         help="この値を大きくすると、再構成画像にノイズが強く出ます。",
     )
 
-    coverage_default = 16 if position_input_mode != "手動・プリセット配置" else 512
+    coverage_default = 128 if position_input_mode != "手動・プリセット配置" else 512
     coverage_reference_elements = st.number_input(
         "uv充填スケーリングの基準要素数",
         min_value=2,
@@ -1023,10 +1063,11 @@ with st.sidebar:
         help="大きくすると、干渉計要素数を増やしたときの変化が見えやすくなります。",
     )
 
-    educational_mode = st.checkbox(
-        "画像変化を強調する（展示用）",
-        value=True,
-        help="オンにすると、要素数が増えたときにuv coverageの穴が埋まる効果を見えやすくします。",
+    uv_effect_mode = st.selectbox(
+        "uv充填効果のモード",
+        ["配置差を強調", "要素数差を強調", "素のサンプリングを表示"],
+        index=0,
+        help="配置差を強調するとuvの穴や方向性を残し、要素数差を強調すると要素数による充填を見えやすくします。",
     )
 
     st.divider()
@@ -1116,14 +1157,22 @@ with st.sidebar:
 
             try:
                 sock = get_udp_socket(udp_host, int(udp_port))
-                latest, packet_count, last_addr = read_latest_udp_packet(sock)
-                if latest is not None:
-                    st.session_state.last_udp_packet = latest
-                    st.session_state.last_udp_time = time.time()
+                latest_valid, packet_count, last_addr, latest_raw, latest_error = read_latest_udp_packet(sock)
+                if latest_raw is not None:
+                    st.session_state.last_udp_raw_packet = normalize_packet_text(latest_raw)
+                    st.session_state.last_udp_raw_time = time.time()
                     st.session_state.last_udp_addr = last_addr
                     st.session_state.last_udp_count += packet_count
+                if latest_error is not None:
+                    st.session_state.last_packet_error = latest_error
+                if latest_valid is not None:
+                    if latest_valid != st.session_state.last_udp_packet:
+                        st.session_state.last_udp_packet = latest_valid
+                        st.session_state.last_udp_time = time.time()
+                    if latest_error is None:
+                        st.session_state.last_packet_error = None
                 hardware_packet = st.session_state.last_udp_packet
-                hardware_packet_error = None
+                hardware_packet_error = st.session_state.last_packet_error
             except Exception as exc:  # noqa: BLE001
                 hardware_packet = st.session_state.last_udp_packet
                 hardware_packet_error = f"UDP受信ソケットを開けませんでした: {exc}"
@@ -1166,7 +1215,29 @@ with st.sidebar:
             "自動コントラスト（形を見やすく）",
             "固定コントラスト（明るさの差を見やすく）",
         ],
-        index=1,
+        index=0,
+    )
+    dirty_cmap = st.selectbox(
+        "dirty画像の配色",
+        ["RdBu_r", "seismic", "coolwarm", "gray"],
+        index=0,
+        help="dirty imageは正負の構造を持つため、発散カラーマップが見やすいです。",
+    )
+    dirty_contrast_percentile = st.slider(
+        "dirty画像のコントラスト範囲",
+        90.0,
+        99.9,
+        99.0,
+        0.1,
+        help="自動コントラスト時に、表示範囲の基準にする絶対値パーセンタイルです。",
+    )
+    dirty_stretch = st.slider(
+        "dirty画像の弱い構造の強調",
+        1.0,
+        10.0,
+        4.0,
+        0.5,
+        help="大きくすると弱い正負のサイドローブや広がった構造が見えやすくなります。",
     )
 
 
@@ -1196,6 +1267,12 @@ if position_input_mode == "手動・プリセット配置":
     parse_error = None
 else:
     contacts, packet_rows, packet_cols, normalized_packet, parse_error = parse_contact_packet(hardware_packet)
+    if (
+        position_input_mode == "UDPハードウェア入力"
+        and not hardware_packet
+        and not st.session_state.last_udp_raw_packet
+    ):
+        parse_error = None
     packet_contacts = contacts
     if parse_error is None:
         pos = contacts_to_positions(contacts, mapping_df)
@@ -1245,7 +1322,7 @@ dirty, effective_uv, count_factor, snr_proxy = reconstruct_dirty_image(
     interferometric_elements=max(int(actual_elements), 2),
     coverage_reference_elements=int(coverage_reference_elements),
     count_effect_strength=float(count_effect_strength),
-    educational_mode=educational_mode,
+    uv_effect_mode=uv_effect_mode,
     seed=seed + 200,
 )
 
@@ -1309,21 +1386,27 @@ if position_input_mode != "手動・プリセット配置":
     with status_cols[2]:
         st.metric("グリッド", f"{packet_cols or '-'} x {packet_rows or '-'}")
     with status_cols[3]:
-        if st.session_state.last_udp_time is None:
+        if st.session_state.last_udp_raw_time is None:
             last_time_text = "未受信"
         else:
-            last_time_text = f"{time.time() - st.session_state.last_udp_time:.1f}秒前"
+            last_time_text = f"{time.time() - st.session_state.last_udp_raw_time:.1f}秒前"
         st.metric("最終UDP受信", last_time_text)
 
     st.caption(packet_status_message)
     st.caption(f"対応表: {mapping_source}")
     if mapping_warning:
         st.warning(mapping_warning)
+    if position_input_mode == "UDPハードウェア入力" and not st.session_state.last_udp_raw_packet:
+        st.warning("まだUDPパケットを受信していません。送信機または udp_sender_test.py を起動してください。")
     if hardware_packet_error:
         st.error(hardware_packet_error)
     if parse_error:
         st.error(parse_error)
+    if position_input_mode == "UDPハードウェア入力" and st.session_state.last_udp_raw_packet:
+        st.caption("最後に受信したパケット")
+        st.code(st.session_state.last_udp_raw_packet, language="text")
     if normalized_packet:
+        st.caption("現在使用中の有効パケット")
         st.code(normalized_packet, language="text")
     if st.session_state.last_udp_addr:
         st.caption(f"最後のUDP送信元: {st.session_state.last_udp_addr} / 累積受信数: {st.session_state.last_udp_count}")
@@ -1347,7 +1430,17 @@ if show_true:
             use_container_width=True,
         )
     with cols[2]:
-        st.pyplot(fig_dirty(dirty, display_mode, fixed_vmax), use_container_width=True)
+        st.pyplot(
+            fig_dirty(
+                dirty,
+                display_mode,
+                fixed_vmax,
+                dirty_contrast_percentile,
+                dirty_stretch,
+                dirty_cmap,
+            ),
+            use_container_width=True,
+        )
     with cols[3]:
         st.pyplot(fig_sky(sky), use_container_width=True)
 else:
@@ -1360,7 +1453,17 @@ else:
             use_container_width=True,
         )
     with cols[2]:
-        st.pyplot(fig_dirty(dirty, display_mode, fixed_vmax), use_container_width=True)
+        st.pyplot(
+            fig_dirty(
+                dirty,
+                display_mode,
+                fixed_vmax,
+                dirty_contrast_percentile,
+                dirty_stretch,
+                dirty_cmap,
+            ),
+            use_container_width=True,
+        )
 
 st.markdown("---")
 st.subheader("2. 望遠鏡スコア")
@@ -1432,6 +1535,7 @@ with st.expander("専門家向けメモ"):
 - representative elements: {fmt(n_rep)}
 - representative max baseline: {rep_max_baseline:g} {unit}
 - uv count factor: {count_factor:.4f}
+- uv effect mode: {uv_effect_mode}
 - coverage reference elements: {fmt(coverage_reference_elements)}
 - uv filling fraction: {100 * uv_fill:.3f}%
 - uv outside fraction: {100 * outside_fraction:.3f}%
