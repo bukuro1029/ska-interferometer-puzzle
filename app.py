@@ -1,5 +1,5 @@
 """
-SKA Interferometer Puzzle — Simplified Streamlit app
+SKA Interferometer Puzzle — Streamlit app with UDP hardware input
 
 Run:
     pip install streamlit numpy matplotlib pandas pillow
@@ -9,6 +9,14 @@ Purpose:
     Educational outreach app showing how interferometric element count,
     maximum baseline, and antenna layout affect uv coverage and a simplified
     dirty image.
+
+Hardware mode:
+    - Receives ASCII contact-grid packets via UDP, default localhost:9900.
+    - Packet example for an 8x3 array:
+          10100100 10100111 11101100
+      Each row is a string of 0/1 values. Rows are separated by spaces.
+    - Converts active grid cells to antenna/station coordinates using either
+      grid_mapping.csv or an automatically generated default mapping.
 
 Important:
     This is an outreach-oriented educational simulator, not a precision radio
@@ -22,8 +30,11 @@ Language policy:
 from __future__ import annotations
 
 import math
+import socket
+import time
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -101,21 +112,6 @@ def robust_normalize(img: np.ndarray, symmetric: bool = False) -> np.ndarray:
     return np.clip((arr - lo) / (hi - lo), 0.0, 1.0)
 
 
-def asinh_stretch_signed(img: np.ndarray, vmax: float, stretch: float = 3.0) -> np.ndarray:
-    """
-    Signed asinh stretch for dirty image display.
-
-    This keeps positive/negative structures while enhancing weak features.
-    It is a display stretch only; it does not change the underlying dirty image.
-    """
-    vmax = max(float(vmax), 1e-12)
-    stretch = max(float(stretch), 1e-6)
-
-    x = np.clip(img / vmax, -1.0, 1.0)
-    y = np.arcsinh(stretch * x) / np.arcsinh(stretch)
-    return np.clip(y, -1.0, 1.0)
-
-
 def blur_array(arr: np.ndarray, passes: int = 2) -> np.ndarray:
     """Simple dependency-free blur for educational uv filling display."""
     out = np.asarray(arr, dtype=float)
@@ -147,8 +143,8 @@ def uv_count_factor(elements: int, reference_elements: int, strength: float = 2.
     """
     Convert interferometric element count to a 0-1 factor for uv filling.
 
-    This is intentionally tuned for outreach:
-    increasing the element count should visibly fill the uv plane.
+    This is intentionally tuned for outreach: increasing the element count should
+    visibly fill the uv plane.
     """
     n = max(float(elements), 2.0)
     ref = max(float(reference_elements), 2.0)
@@ -324,11 +320,179 @@ def load_uploaded_sky(
 
 
 # ============================================================
+# Hardware packet and grid mapping utilities
+# ============================================================
+
+
+def normalize_packet_text(packet: str) -> str:
+    """Normalize whitespace in a contact packet."""
+    return " ".join(str(packet).replace("¥n", " ").replace("¥r", " ").split())
+
+
+def parse_contact_packet(packet: str) -> Tuple[List[Tuple[int, int]], Optional[int], Optional[int], str, Optional[str]]:
+    """
+    Parse ASCII contact packet.
+
+    Packet format:
+        row0 row1 row2 ...
+    Example:
+        10100100 10100111 11101100
+
+    Returns:
+        contacts, rows, cols, normalized_packet, error_message
+    """
+    normalized = normalize_packet_text(packet)
+    if not normalized:
+        return [], None, None, "", "パケットが空です。"
+
+    row_strings = normalized.split()
+    cols = len(row_strings[0])
+    if cols == 0:
+        return [], None, None, normalized, "列数が0です。"
+
+    for row in row_strings:
+        if len(row) != cols:
+            return [], None, None, normalized, "行ごとの文字数が一致していません。"
+        bad = [ch for ch in row if ch not in {"0", "1"}]
+        if bad:
+            return [], None, None, normalized, "0/1以外の文字が含まれています。"
+
+    contacts: List[Tuple[int, int]] = []
+    for r, row in enumerate(row_strings):
+        for c, ch in enumerate(row):
+            if ch == "1":
+                contacts.append((r, c))
+
+    return contacts, len(row_strings), cols, normalized, None
+
+
+def make_default_grid_mapping(rows: int, cols: int, max_baseline: float) -> pd.DataFrame:
+    """Create a simple rectangular grid mapping.
+
+    The square side is chosen so that the corner-to-corner distance is roughly
+    the maximum baseline. Row 0 is displayed at the top.
+    """
+    rows = max(int(rows), 1)
+    cols = max(int(cols), 1)
+    half_side = max_baseline / (2.0 * math.sqrt(2.0))
+    xs = np.linspace(-half_side, half_side, cols)
+    ys = np.linspace(half_side, -half_side, rows)
+
+    data = []
+    for r, y in enumerate(ys):
+        for c, x in enumerate(xs):
+            data.append({"row": r, "col": c, "x": float(x), "y": float(y), "enabled": 1})
+    return pd.DataFrame(data)
+
+
+def load_grid_mapping(
+    mapping_path: str,
+    uploaded_mapping,
+    rows: int,
+    cols: int,
+    max_baseline: float,
+) -> Tuple[pd.DataFrame, str, Optional[str]]:
+    """Load grid mapping from uploaded CSV or local CSV path. Fallback to default mapping."""
+    required = {"row", "col", "x", "y"}
+
+    try:
+        if uploaded_mapping is not None:
+            df = pd.read_csv(uploaded_mapping)
+            source = "アップロードされた対応表CSV"
+        elif mapping_path and Path(mapping_path).exists():
+            df = pd.read_csv(mapping_path)
+            source = f"ローカル対応表CSV: {mapping_path}"
+        else:
+            df = make_default_grid_mapping(rows, cols, max_baseline)
+            source = "自動生成したデフォルト対応表"
+            return df, source, None
+
+        missing = required - set(df.columns)
+        if missing:
+            df_default = make_default_grid_mapping(rows, cols, max_baseline)
+            return (
+                df_default,
+                "自動生成したデフォルト対応表",
+                f"対応表CSVに必要な列がありません: {sorted(missing)}。デフォルト対応表を使います。",
+            )
+
+        df = df.copy()
+        df["row"] = df["row"].astype(int)
+        df["col"] = df["col"].astype(int)
+        df["x"] = df["x"].astype(float)
+        df["y"] = df["y"].astype(float)
+        if "enabled" not in df.columns:
+            df["enabled"] = 1
+        df = df[df["enabled"].astype(int) != 0]
+        return df, source, None
+    except Exception as exc:  # noqa: BLE001
+        df_default = make_default_grid_mapping(rows, cols, max_baseline)
+        return (
+            df_default,
+            "自動生成したデフォルト対応表",
+            f"対応表CSVの読み込みに失敗しました: {exc}。デフォルト対応表を使います。",
+        )
+
+
+def contacts_to_positions(contacts: List[Tuple[int, int]], mapping_df: pd.DataFrame) -> np.ndarray:
+    lookup: Dict[Tuple[int, int], Tuple[float, float]] = {}
+    for _, row in mapping_df.iterrows():
+        lookup[(int(row["row"]), int(row["col"]))] = (float(row["x"]), float(row["y"]))
+
+    positions: List[Tuple[float, float]] = []
+    for key in contacts:
+        if key in lookup:
+            positions.append(lookup[key])
+
+    if not positions:
+        return np.empty((0, 2), dtype=float)
+    return np.asarray(positions, dtype=float)
+
+
+@st.cache_resource(show_spinner=False)
+def get_udp_socket(host: str, port: int) -> socket.socket:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind((host, int(port)))
+    sock.setblocking(False)
+    return sock
+
+
+def read_latest_udp_packet(sock: socket.socket, max_packets: int = 100) -> Tuple[Optional[str], int, Optional[str]]:
+    """Read all currently available UDP packets and return only the latest one."""
+    latest: Optional[str] = None
+    count = 0
+    last_addr: Optional[str] = None
+
+    for _ in range(max_packets):
+        try:
+            data, addr = sock.recvfrom(65535)
+        except BlockingIOError:
+            break
+        except OSError:
+            break
+        latest = data.decode("ascii", errors="replace").strip()
+        count += 1
+        last_addr = f"{addr[0]}:{addr[1]}"
+
+    return latest, count, last_addr
+
+
+def safe_rerun() -> None:
+    if hasattr(st, "rerun"):
+        st.rerun()
+    else:  # pragma: no cover - for older Streamlit
+        st.experimental_rerun()
+
+
+# ============================================================
 # Layout generation
 # ============================================================
 
 
 def clip_to_radius(pos: np.ndarray, radius: float) -> np.ndarray:
+    if len(pos) == 0:
+        return np.empty((0, 2), dtype=float)
     r = np.hypot(pos[:, 0], pos[:, 1])
     mask = r > radius
     if np.any(mask):
@@ -386,6 +550,9 @@ def make_layout(kind: str, n: int, radius: float, seed: int) -> np.ndarray:
 
 
 def baselines(pos: np.ndarray) -> np.ndarray:
+    if len(pos) < 2:
+        return np.empty((0, 2), dtype=float)
+
     out: List[Tuple[float, float]] = []
     n = len(pos)
     for i in range(n):
@@ -420,6 +587,9 @@ def make_sparse_uv_weight(
 ) -> Tuple[np.ndarray, float]:
     bl = baselines(pos)
     weight = np.zeros((grid, grid), dtype=float)
+    if len(bl) == 0:
+        return weight, 0.0
+
     c = grid // 2
     scale = (0.45 * grid * uv_zoom) / max(reference_baseline, 1e-12)
     r_pix = max(1, int(point_radius))
@@ -559,6 +729,9 @@ def compute_scores(
     mission: str,
     count_factor: float,
 ) -> Scores:
+    if len(pos) < 2:
+        return Scores(0.0, 0.0, 0.0, 0.0, 0.0, "アンテナは少なくとも2個必要です。")
+
     bl = baselines(pos)
     length = np.hypot(bl[:, 0], bl[:, 1])
     max_possible = max(2 * radius, 1e-12)
@@ -623,7 +796,8 @@ def fig_layout(pos: np.ndarray, radius: float, unit: str) -> plt.Figure:
     fig, ax = plt.subplots(figsize=(4, 4))
     circle = plt.Circle((0, 0), radius, fill=False, linestyle="--", linewidth=1.2)
     ax.add_patch(circle)
-    ax.scatter(pos[:, 0], pos[:, 1], s=38)
+    if len(pos) > 0:
+        ax.scatter(pos[:, 0], pos[:, 1], s=38)
     ax.set_aspect("equal", adjustable="box")
     ax.set_xlim(-1.08 * radius, 1.08 * radius)
     ax.set_ylim(-1.08 * radius, 1.08 * radius)
@@ -636,7 +810,7 @@ def fig_layout(pos: np.ndarray, radius: float, unit: str) -> plt.Figure:
 
 def fig_uv(weight: np.ndarray, title: str) -> plt.Figure:
     fig, ax = plt.subplots(figsize=(4, 4))
-    ax.imshow(weight, origin="lower", interpolation="nearest", vmin=0, vmax=1, cmap="magma")
+    ax.imshow(weight, origin="lower", interpolation="nearest", vmin=0, vmax=1)
     ax.set_title(title)
     ax.set_xticks([])
     ax.set_yticks([])
@@ -645,39 +819,26 @@ def fig_uv(weight: np.ndarray, title: str) -> plt.Figure:
 
 def fig_sky(sky: np.ndarray) -> plt.Figure:
     fig, ax = plt.subplots(figsize=(4, 4))
-    ax.imshow(sky, origin="upper", interpolation="nearest", vmin=0, vmax=1, cmap="gray")
+    ax.imshow(sky, origin="upper", interpolation="nearest", vmin=0, vmax=1)
     ax.set_title("Input image / true structure")
     ax.set_xticks([])
     ax.set_yticks([])
     return fig
 
 
-def fig_dirty(
-    dirty: np.ndarray,
-    display_mode: str,
-    fixed_vmax: float,
-    contrast_percentile: float,
-    stretch: float,
-    cmap: str,
-) -> plt.Figure:
+def fig_dirty(dirty: np.ndarray, display_mode: str, fixed_vmax: float) -> plt.Figure:
     fig, ax = plt.subplots(figsize=(4, 4))
-
     if display_mode == "自動コントラスト（形を見やすく）":
-        vmax = np.percentile(np.abs(dirty), contrast_percentile)
+        img = robust_normalize(dirty, symmetric=True)
+        ax.imshow(img, origin="upper", interpolation="nearest", vmin=-1, vmax=1)
     else:
-        vmax = fixed_vmax
-
-    img = asinh_stretch_signed(dirty, vmax=vmax, stretch=stretch)
-
-    ax.imshow(
-        img,
-        origin="upper",
-        interpolation="nearest",
-        vmin=-1,
-        vmax=1,
-        cmap=cmap,
-    )
-
+        ax.imshow(
+            dirty,
+            origin="upper",
+            interpolation="nearest",
+            vmin=-fixed_vmax,
+            vmax=fixed_vmax,
+        )
     ax.set_title("Reconstructed image (dirty image)")
     ax.set_xticks([])
     ax.set_yticks([])
@@ -691,6 +852,22 @@ def metric_bar(label: str, value: float) -> None:
 
 def fmt(n: int) -> str:
     return f"{int(n):,}"
+
+
+# ============================================================
+# Session state for hardware mode
+# ============================================================
+
+if "last_udp_packet" not in st.session_state:
+    st.session_state.last_udp_packet = ""
+if "last_udp_time" not in st.session_state:
+    st.session_state.last_udp_time = None
+if "last_udp_addr" not in st.session_state:
+    st.session_state.last_udp_addr = None
+if "last_udp_count" not in st.session_state:
+    st.session_state.last_udp_count = 0
+if "last_packet_error" not in st.session_state:
+    st.session_state.last_packet_error = None
 
 
 # ============================================================
@@ -762,6 +939,16 @@ with st.sidebar:
         gamma_uploaded = st.slider("ガンマ補正", 0.3, 3.0, 1.0, 0.1)
 
     st.divider()
+    st.subheader("アンテナ位置入力")
+
+    position_input_mode = st.selectbox(
+        "位置入力モード",
+        ["手動・プリセット配置", "UDPハードウェア入力", "テキストパケット入力（テスト用）"],
+        index=0,
+        help="UDPハードウェア入力では、localhost:9900などで受け取った接点情報からアンテナ位置を決めます。",
+    )
+
+    st.divider()
     st.subheader("望遠鏡仕様")
 
     preset_name = st.selectbox("プリセット", list(TELESCOPE_PRESETS.keys()), index=1)
@@ -774,13 +961,17 @@ with st.sidebar:
         key=f"unit_{preset_name}",
     )
 
-    actual_elements = st.number_input(
-        "干渉計要素数（station / dish 数）",
-        min_value=2,
-        max_value=200_000,
-        value=int(preset["interferometric_elements"]),
-        step=1,
-    )
+    if position_input_mode == "手動・プリセット配置":
+        actual_elements_input = st.number_input(
+            "干渉計要素数（station / dish 数）",
+            min_value=2,
+            max_value=200_000,
+            value=int(preset["interferometric_elements"]),
+            step=1,
+        )
+    else:
+        st.caption("UDP/テキスト入力時は、検出された接点数を干渉計要素数として使います。")
+        actual_elements_input = 0
 
     max_baseline = st.number_input(
         f"最大基線・最大分離（{unit}）",
@@ -813,13 +1004,14 @@ with st.sidebar:
         help="この値を大きくすると、再構成画像にノイズが強く出ます。",
     )
 
+    coverage_default = 16 if position_input_mode != "手動・プリセット配置" else 512
     coverage_reference_elements = st.number_input(
         "uv充填スケーリングの基準要素数",
         min_value=2,
         max_value=500_000,
-        value=512,
+        value=coverage_default,
         step=1,
-        help="この値に近づくほど、uv coverageが埋まるように表示します。",
+        help="この値に近づくほど、uv coverageが埋まるように表示します。展示用の最大アンテナ数を入れると分かりやすいです。",
     )
 
     count_effect_strength = st.slider(
@@ -838,54 +1030,121 @@ with st.sidebar:
     )
 
     st.divider()
-    st.subheader("配置")
 
-    layout_kind = st.selectbox(
-        "配置タイプ",
-        [
-            "中心集中型",
-            "長基線重視型",
-            "直線型",
-            "ランダム型",
-            "三本腕型",
-            "SKA風バランス型",
-            "手動編集",
-        ],
-        index=5 if "SKA" in preset_name else 3,
-    )
+    # Position-source specific controls
+    if position_input_mode == "手動・プリセット配置":
+        st.subheader("配置")
 
-    seed = st.slider("乱数シード", 0, 999, 42, 1)
+        layout_kind = st.selectbox(
+            "配置タイプ",
+            [
+                "中心集中型",
+                "長基線重視型",
+                "直線型",
+                "ランダム型",
+                "三本腕型",
+                "SKA風バランス型",
+                "手動編集",
+            ],
+            index=5 if "SKA" in preset_name else 3,
+        )
 
-    auto_rep = st.checkbox(
-        "表示用の代表要素数を自動設定する",
-        value=True,
-        help="実機の全要素をそのまま描くと重いため、代表点で表示します。",
-    )
+        seed = st.slider("乱数シード", 0, 999, 42, 1)
 
-    display_cap = st.slider(
-        "代表要素数の上限",
-        8,
-        512,
-        int(preset["display_cap"]),
-        1,
-    )
+        auto_rep = st.checkbox(
+            "表示用の代表要素数を自動設定する",
+            value=True,
+            help="実機の全要素をそのまま描くと重いため、代表点で表示します。",
+        )
 
-    if auto_rep:
-        n_rep = int(min(max(actual_elements, 4), display_cap))
-        st.caption(f"現在の代表要素数：{n_rep}")
-    else:
-        n_rep = st.slider(
-            "代表要素数",
-            4,
-            int(min(max(actual_elements, 4), 512)),
-            int(min(actual_elements, display_cap)),
+        display_cap = st.slider(
+            "代表要素数の上限",
+            8,
+            512,
+            int(preset["display_cap"]),
             1,
         )
+
+        if auto_rep:
+            n_rep = int(min(max(int(actual_elements_input), 4), display_cap))
+            st.caption(f"現在の代表要素数：{n_rep}")
+        else:
+            n_rep = st.slider(
+                "代表要素数",
+                4,
+                int(min(max(int(actual_elements_input), 4), 512)),
+                int(min(int(actual_elements_input), display_cap)),
+                1,
+            )
+
+        hardware_packet = ""
+        hardware_packet_error = None
+        mapping_df = pd.DataFrame()
+        mapping_source = ""
+        mapping_warning = None
+        udp_auto_update = False
+        udp_update_interval = 0.5
+
+    else:
+        st.subheader("接点パケット入力")
+
+        default_rows = st.slider("デフォルト対応表の行数", 3, 16, 8, 1)
+        default_cols = st.slider("デフォルト対応表の列数", 3, 16, 8, 1)
+        mapping_path = st.text_input("grid_mapping.csv のパス", value="grid_mapping.csv")
+        uploaded_mapping = st.file_uploader("対応表CSVをアップロード（任意）", type=["csv"])
+
+        mapping_df, mapping_source, mapping_warning = load_grid_mapping(
+            mapping_path=mapping_path,
+            uploaded_mapping=uploaded_mapping,
+            rows=default_rows,
+            cols=default_cols,
+            max_baseline=max_baseline,
+        )
+        sample_csv = make_default_grid_mapping(default_rows, default_cols, max_baseline).to_csv(index=False).encode("utf-8")
+        st.download_button(
+            "サンプル対応表CSVをダウンロード",
+            data=sample_csv,
+            file_name="grid_mapping_sample.csv",
+            mime="text/csv",
+        )
+
+        if position_input_mode == "UDPハードウェア入力":
+            udp_host = st.text_input("UDP受信ホスト", value="127.0.0.1")
+            udp_port = st.number_input("UDP受信ポート", min_value=1, max_value=65535, value=9900, step=1)
+            udp_update_interval = st.slider("画面更新間隔（秒）", 0.2, 2.0, 0.5, 0.1)
+            udp_auto_update = st.checkbox("自動更新する", value=True)
+
+            try:
+                sock = get_udp_socket(udp_host, int(udp_port))
+                latest, packet_count, last_addr = read_latest_udp_packet(sock)
+                if latest is not None:
+                    st.session_state.last_udp_packet = latest
+                    st.session_state.last_udp_time = time.time()
+                    st.session_state.last_udp_addr = last_addr
+                    st.session_state.last_udp_count += packet_count
+                hardware_packet = st.session_state.last_udp_packet
+                hardware_packet_error = None
+            except Exception as exc:  # noqa: BLE001
+                hardware_packet = st.session_state.last_udp_packet
+                hardware_packet_error = f"UDP受信ソケットを開けませんでした: {exc}"
+        else:
+            udp_auto_update = False
+            udp_update_interval = 0.5
+            hardware_packet = st.text_area(
+                "テスト用パケット",
+                value="10000001 01000010 00100100 00011000 00011000 00100100 01000010 10000001",
+                help="例: 10100100 10100111 11101100",
+            )
+            hardware_packet_error = None
+
+        seed = st.slider("乱数シード", 0, 999, 42, 1)
+        layout_kind = "UDP/テキスト入力"
+        n_rep = 0
 
     st.divider()
     st.subheader("表示・比較設定")
 
-    grid = st.select_slider("画像サイズ", options=[64, 96, 128, 160], value=128)
+    grid = st.select_slider("画像サイズ", options=[64, 96, 128, 160], value=96 if position_input_mode != "手動・プリセット配置" else 128)
 
     reference_baseline = st.number_input(
         f"uv表示用の基準最大基線（{unit}）",
@@ -907,32 +1166,7 @@ with st.sidebar:
             "自動コントラスト（形を見やすく）",
             "固定コントラスト（明るさの差を見やすく）",
         ],
-        index=0,
-    )
-
-    dirty_cmap = st.selectbox(
-        "dirty画像の配色",
-        ["RdBu_r", "seismic", "coolwarm", "gray"],
-        index=0,
-        help="dirty imageは正負の値を持つため、発散カラーマップが見やすいです。",
-    )
-
-    contrast_percentile = st.slider(
-        "dirty画像のコントラスト範囲",
-        90.0,
-        99.9,
-        99.0,
-        0.1,
-        help="自動コントラスト時に、何パーセンタイルまでを表示範囲に使うかを指定します。",
-    )
-
-    asinh_stretch = st.slider(
-        "dirty画像の弱い構造の強調",
-        1.0,
-        10.0,
-        4.0,
-        0.5,
-        help="大きくすると、弱い構造や偽模様が見えやすくなります。",
+        index=1,
     )
 
 
@@ -942,16 +1176,34 @@ with st.sidebar:
 
 radius = max_baseline / 2.0
 
-if layout_kind == "手動編集":
-    default = make_layout("SKA風バランス型", n_rep, radius, seed)
-    df = pd.DataFrame(default, columns=[f"x ({unit})", f"y ({unit})"])
-    st.subheader("手動配置エディタ")
-    st.write("x, y 座標を直接編集できます。")
-    edited = st.data_editor(df, num_rows="fixed", use_container_width=True)
-    pos = edited[[f"x ({unit})", f"y ({unit})"]].to_numpy(float)
-    pos = clip_to_radius(pos, radius)
+if position_input_mode == "手動・プリセット配置":
+    if layout_kind == "手動編集":
+        default = make_layout("SKA風バランス型", n_rep, radius, seed)
+        df = pd.DataFrame(default, columns=[f"x ({unit})", f"y ({unit})"])
+        st.subheader("手動配置エディタ")
+        st.write("x, y 座標を直接編集できます。")
+        edited = st.data_editor(df, num_rows="fixed", use_container_width=True)
+        pos = edited[[f"x ({unit})", f"y ({unit})"]].to_numpy(float)
+        pos = clip_to_radius(pos, radius)
+    else:
+        pos = make_layout(layout_kind, n_rep, radius, seed)
+    actual_elements = int(actual_elements_input)
+    packet_status_message = "手動・プリセット配置を使用中"
+    packet_contacts: List[Tuple[int, int]] = []
+    packet_rows = None
+    packet_cols = None
+    normalized_packet = ""
+    parse_error = None
 else:
-    pos = make_layout(layout_kind, n_rep, radius, seed)
+    contacts, packet_rows, packet_cols, normalized_packet, parse_error = parse_contact_packet(hardware_packet)
+    packet_contacts = contacts
+    if parse_error is None:
+        pos = contacts_to_positions(contacts, mapping_df)
+    else:
+        pos = np.empty((0, 2), dtype=float)
+    actual_elements = int(len(pos))
+    n_rep = actual_elements
+    packet_status_message = "UDP/テキスト接点パケットを使用中"
 
 if sky_source == "自分の画像をアップロード" and uploaded_file is not None:
     sky = load_uploaded_sky(
@@ -990,7 +1242,7 @@ dirty, effective_uv, count_factor, snr_proxy = reconstruct_dirty_image(
     envelope=envelope,
     base_noise=base_noise,
     signal_strength=float(signal_strength),
-    interferometric_elements=int(actual_elements),
+    interferometric_elements=max(int(actual_elements), 2),
     coverage_reference_elements=int(coverage_reference_elements),
     count_effect_strength=float(count_effect_strength),
     educational_mode=educational_mode,
@@ -1009,7 +1261,7 @@ fixed_vmax = max(float(np.percentile(np.abs(sky - np.mean(sky)), 99)), 1e-9)
 
 scores = compute_scores(
     pos=pos,
-    radius=radius,
+    radius=max(radius, 1e-12),
     mission=mission,
     count_factor=count_factor,
 )
@@ -1046,6 +1298,36 @@ st.caption(
     "画像の細かさは主に最大基線と配置で決まり、干渉計要素数を増やすとuv coverageの穴が埋まり、偽物の模様が減ります。"
 )
 
+if position_input_mode != "手動・プリセット配置":
+    st.markdown("---")
+    st.subheader("接点パケット受信状態")
+    status_cols = st.columns(4)
+    with status_cols[0]:
+        st.metric("検出接点数", len(packet_contacts))
+    with status_cols[1]:
+        st.metric("有効アンテナ数", len(pos))
+    with status_cols[2]:
+        st.metric("グリッド", f"{packet_cols or '-'} x {packet_rows or '-'}")
+    with status_cols[3]:
+        if st.session_state.last_udp_time is None:
+            last_time_text = "未受信"
+        else:
+            last_time_text = f"{time.time() - st.session_state.last_udp_time:.1f}秒前"
+        st.metric("最終UDP受信", last_time_text)
+
+    st.caption(packet_status_message)
+    st.caption(f"対応表: {mapping_source}")
+    if mapping_warning:
+        st.warning(mapping_warning)
+    if hardware_packet_error:
+        st.error(hardware_packet_error)
+    if parse_error:
+        st.error(parse_error)
+    if normalized_packet:
+        st.code(normalized_packet, language="text")
+    if st.session_state.last_udp_addr:
+        st.caption(f"最後のUDP送信元: {st.session_state.last_udp_addr} / 累積受信数: {st.session_state.last_udp_count}")
+
 if outside_fraction > 0.05:
     st.warning(
         f"uv点の約 {100 * outside_fraction:.1f}% が表示範囲外です。"
@@ -1061,21 +1343,11 @@ if show_true:
         st.pyplot(fig_layout(pos, radius, unit), use_container_width=True)
     with cols[1]:
         st.pyplot(
-            fig_uv(effective_uv, "Effective uv coverage\n(used for dirty image)"),
+            fig_uv(effective_uv, "Effective uv coverage¥n(used for dirty image)"),
             use_container_width=True,
         )
     with cols[2]:
-        st.pyplot(
-            fig_dirty(
-                dirty,
-                display_mode,
-                fixed_vmax,
-                contrast_percentile=contrast_percentile,
-                stretch=asinh_stretch,
-                cmap=dirty_cmap,
-            ),
-            use_container_width=True,
-        )
+        st.pyplot(fig_dirty(dirty, display_mode, fixed_vmax), use_container_width=True)
     with cols[3]:
         st.pyplot(fig_sky(sky), use_container_width=True)
 else:
@@ -1084,21 +1356,11 @@ else:
         st.pyplot(fig_layout(pos, radius, unit), use_container_width=True)
     with cols[1]:
         st.pyplot(
-            fig_uv(effective_uv, "Effective uv coverage\n(used for dirty image)"),
+            fig_uv(effective_uv, "Effective uv coverage¥n(used for dirty image)"),
             use_container_width=True,
         )
     with cols[2]:
-        st.pyplot(
-            fig_dirty(
-                dirty,
-                display_mode,
-                fixed_vmax,
-                contrast_percentile=contrast_percentile,
-                stretch=asinh_stretch,
-                cmap=dirty_cmap,
-            ),
-            use_container_width=True,
-        )
+        st.pyplot(fig_dirty(dirty, display_mode, fixed_vmax), use_container_width=True)
 
 st.markdown("---")
 st.subheader("2. 望遠鏡スコア")
@@ -1117,68 +1379,39 @@ st.metric("ミッション達成度", f"{scores.total:.0f} / 100")
 st.info(scores.comment)
 
 st.markdown("---")
-st.subheader("3. dirty画像を見やすくする推奨設定")
+st.subheader("3. UDPハードウェア入力の使い方")
 
 st.write(
     """
-配置やアンテナ数の違いを見やすくしたい場合は、まず次の設定を試してください。
+接点検出ソフトから、以下のようなASCIIパケットをUDPで送ってください。
 
-- **dirty画像の表示**：自動コントラスト
-- **dirty画像の配色**：RdBu_r
-- **dirty画像のコントラスト範囲**：99.0
-- **dirty画像の弱い構造の強調**：4.0
-- **入力画像**：SKAの文字、または多数の点源
-- **基準ノイズレベル**：0.05〜0.12
-- **干渉計要素数**：8〜64程度から試す
+```text
+10100100 10100111 11101100
+```
 
-dirty image は正負の値を持つため、白黒や通常の連続カラーマップより、赤青系の発散カラーマップの方が差を見やすくなります。
+- 送信先は通常 `127.0.0.1:9900` です。
+- 各行は0/1の文字列です。
+- `1` の接点をアンテナ模型が置かれた位置として扱います。
+- `grid_mapping.csv` がある場合は、その対応表で `(row, col)` を `(x, y)` に変換します。
+- `grid_mapping.csv` がない場合は、自動生成した矩形グリッドを使います。
 """
 )
 
 st.markdown("---")
-st.subheader("4. アンテナ数の効果を見せる推奨設定")
-
-st.write(
-    """
-アンテナ数、より正確には **干渉計要素数** の効果を見せたい場合は、次の設定が分かりやすいです。
-
-- **入力画像**：SKAの文字
-- **dirty画像の表示**：自動コントラスト、または固定コントラスト
-- **信号の強さ**：0.5
-- **基準ノイズレベル**：0.05〜0.12
-- **配置タイプ**：ランダム型、またはSKA風バランス型
-- **最大基線**：100〜150 km
-- **uv充填効果の強さ**：2.0
-
-そのうえで、
-
-- **干渉計要素数**：8 → 16 → 32 → 64 → 128 → 256 → 512
-
-と変化させてください。少数ではuv coverageが疎で偽模様が出やすく、多数ではuv coverageが埋まり、再構成画像が安定していく様子が見えます。
-"""
-)
-
-st.markdown("---")
-st.subheader("5. 各設定が何に効くか")
+st.subheader("4. 各設定が何に効くか")
 
 st.write(
     """
 **画像そのものに効く設定**
-- **干渉計要素数**：uv coverageを埋め、偽物の模様を減らす。
+- **干渉計要素数 / 検出された接点数**：uv coverageを埋め、偽物の模様を減らす。
 - **最大基線**：解像度を上げ、細かい構造を見えるようにする。
-- **配置タイプ / 手動配置**：uv sampling patternを変える。
+- **配置タイプ / UDP接点位置 / 手動配置**：uv sampling patternを変える。
 - **信号の強さ**：天体信号がノイズの上に現れるかどうかを決める。
 - **基準ノイズレベル**：信号の見えにくさを変える。
 
-**表示を見やすくする設定**
-- **dirty画像の配色**
-- **dirty画像のコントラスト範囲**
-- **dirty画像の弱い構造の強調**
-- **自動 / 固定コントラスト**
-
 **説明として残したもの**
 - SKA-Lowの131,072本の物理アンテナは、512 stationにまとめられます。
-- このアプリでは、画像再構成に直接効く要素としてstation/dish数を操作します。
+- このアプリでは、画像再構成に直接効く要素としてstation/dish数、または接点で検出されたアンテナ模型の数を操作します。
 """
 )
 
@@ -1188,10 +1421,8 @@ with st.expander("専門家向けメモ"):
 このアプリは、厳密な電波干渉計イメージングコードではありません。
 疎な baseline sampling、最大基線に対応する教育用 Fourier envelope、簡略化したノイズモデルを組み合わせています。
 
-dirty image表示には、発散カラーマップ、パーセンタイルコントラスト、signed asinh stretchを使っています。
-これは表示上の強調であり、再構成画像の数値そのものを変える処理ではありません。
-
 現在の内部量：
+- position input mode: {position_input_mode}
 - preset: {preset_name}
 - layout: {layout_kind}
 - input mode: {sky_source}
@@ -1207,10 +1438,16 @@ dirty image表示には、発散カラーマップ、パーセンタイルコン
 - base noise: {base_noise:.4f}
 - S/N proxy: {snr_proxy:.4f}
 - dirty image RMS: {dirty_rms:.4e}
-- dirty cmap: {dirty_cmap}
-- dirty contrast percentile: {contrast_percentile:.1f}
-- dirty asinh stretch: {asinh_stretch:.1f}
 """
     )
 
 st.caption("SKAアウトリーチ用の教育プロトタイプです。")
+
+
+# ============================================================
+# Auto refresh for UDP hardware mode
+# ============================================================
+
+if position_input_mode == "UDPハードウェア入力" and udp_auto_update:
+    time.sleep(float(udp_update_interval))
+    safe_rerun()
