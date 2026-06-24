@@ -342,7 +342,7 @@ def load_uploaded_sky(
 
 def normalize_packet_text(packet: str) -> str:
     """Normalize whitespace in a contact packet."""
-    return " ".join(str(packet).replace("¥n", " ").replace("¥r", " ").split())
+    return " ".join(str(packet).replace("\n", " ").replace("\r", " ").split())
 
 
 def parse_contact_packet(packet: str) -> Tuple[List[Tuple[int, int]], Optional[int], Optional[int], str, Optional[str]]:
@@ -1152,7 +1152,7 @@ with st.sidebar:
         if position_input_mode == "UDPハードウェア入力":
             udp_host = st.text_input("UDP受信ホスト", value="127.0.0.1")
             udp_port = st.number_input("UDP受信ポート", min_value=1, max_value=65535, value=9900, step=1)
-            udp_update_interval = st.slider("画面更新間隔（秒）", 0.2, 2.0, 0.5, 0.1)
+            udp_update_interval = st.slider("画面更新間隔（秒）", 0.1, 2.0, 0.5, 0.1)
             udp_auto_update = st.checkbox("自動更新する", value=True)
 
             try:
@@ -1426,7 +1426,7 @@ if show_true:
         st.pyplot(fig_layout(pos, radius, unit), use_container_width=True)
     with cols[1]:
         st.pyplot(
-            fig_uv(effective_uv, "Effective uv coverage¥n(used for dirty image)"),
+            fig_uv(effective_uv, "Effective uv coverage\n(used for dirty image)"),
             use_container_width=True,
         )
     with cols[2]:
@@ -1449,7 +1449,7 @@ else:
         st.pyplot(fig_layout(pos, radius, unit), use_container_width=True)
     with cols[1]:
         st.pyplot(
-            fig_uv(effective_uv, "Effective uv coverage¥n(used for dirty image)"),
+            fig_uv(effective_uv, "Effective uv coverage\n(used for dirty image)"),
             use_container_width=True,
         )
     with cols[2]:
