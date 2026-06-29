@@ -6,6 +6,7 @@ Run examples:
     python udp_sender_test.py --rows 8 --cols 8 --interval 0.2 --mode random
     python udp_sender_test.py --packet "10100100 10100111 11101100"
     python udp_sender_test.py --rows 8 --cols 8 --interval 0.2 --mode moving --count 3
+    python udp_sender_test.py --rows 8 --cols 8 --interval 0.2 --mode moving --seq
 """
 
 from __future__ import annotations
@@ -49,6 +50,7 @@ def main() -> None:
     parser.add_argument('--mode', choices=['moving', 'random'], default='moving')
     parser.add_argument('--packet', default=None, help='Send this one packet repeatedly.')
     parser.add_argument('--count', type=int, default=0, help='Number of packets to send. 0 means run until Ctrl+C.')
+    parser.add_argument('--seq', action='store_true', help='Prefix packets with seq=N for receiver debugging.')
     args = parser.parse_args()
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -62,8 +64,9 @@ def main() -> None:
                 packet = random_packet(args.rows, args.cols, args.active)
             else:
                 packet = moving_packet(args.rows, args.cols, step)
-            sock.sendto(packet.encode('ascii'), (args.host, args.port))
-            print(packet)
+            packet_to_send = f'seq={step + 1} {packet}' if args.seq else packet
+            sock.sendto(packet_to_send.encode('ascii'), (args.host, args.port))
+            print(packet_to_send)
             step += 1
             if args.count > 0 and step >= args.count:
                 break

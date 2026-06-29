@@ -30,17 +30,25 @@ Language policy:
 from __future__ import annotations
 
 import math
+import re
 import socket
+import threading
 import time
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Deque, Dict, List, Optional, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import streamlit as st
 from PIL import Image, ImageOps
+
+try:
+    from streamlit_autorefresh import st_autorefresh
+except ImportError:  # pragma: no cover - optional local fallback
+    st_autorefresh = None
 
 
 # ============================================================
@@ -345,41 +353,59 @@ def normalize_packet_text(packet: str) -> str:
     return " ".join(str(packet).replace("\n", " ").replace("\r", " ").split())
 
 
-def parse_contact_packet(packet: str) -> Tuple[List[Tuple[int, int]], Optional[int], Optional[int], str, Optional[str]]:
+def parse_contact_packet(
+    packet: str,
+) -> Tuple[Optional[np.ndarray], Optional[int], Optional[int], Optional[int], str, Optional[str]]:
     """
     Parse ASCII contact packet.
 
     Packet format:
         row0 row1 row2 ...
+        seq=123 row0 row1 row2 ...
+        SEQ:123 row0 row1 row2 ...
     Example:
         10100100 10100111 11101100
 
     Returns:
-        contacts, rows, cols, normalized_packet, error_message
+        contact_array, rows, cols, seq, normalized_packet, error_message
     """
     normalized = normalize_packet_text(packet)
     if not normalized:
-        return [], None, None, "", "パケットが空です。"
+        return None, None, None, None, "", "パケットが空です。"
 
-    row_strings = normalized.split()
+    tokens = normalized.split()
+    seq: Optional[int] = None
+    seq_match = re.match(r"^seq(?:=|:)(\d+)$", tokens[0], flags=re.IGNORECASE)
+    if seq_match:
+        seq = int(seq_match.group(1))
+        tokens = tokens[1:]
+        normalized = " ".join([f"seq={seq}", *tokens])
+
+    if not tokens:
+        return None, None, None, seq, normalized, "接点行がありません。"
+
+    row_strings = tokens
     cols = len(row_strings[0])
     if cols == 0:
-        return [], None, None, normalized, "列数が0です。"
+        return None, None, None, seq, normalized, "列数が0です。"
 
     for row in row_strings:
         if len(row) != cols:
-            return [], None, None, normalized, "行ごとの文字数が一致していません。"
+            return None, None, None, seq, normalized, "行ごとの文字数が一致していません。"
         bad = [ch for ch in row if ch not in {"0", "1"}]
         if bad:
-            return [], None, None, normalized, "0/1以外の文字が含まれています。"
+            return None, None, None, seq, normalized, "0/1以外の文字が含まれています。"
 
-    contacts: List[Tuple[int, int]] = []
-    for r, row in enumerate(row_strings):
-        for c, ch in enumerate(row):
-            if ch == "1":
-                contacts.append((r, c))
+    contact_array = np.array([[ch == "1" for ch in row] for row in row_strings], dtype=bool)
 
-    return contacts, len(row_strings), cols, normalized, None
+    return contact_array, len(row_strings), cols, seq, normalized, None
+
+
+def contact_array_to_cells(contact_array: Optional[np.ndarray]) -> List[Tuple[int, int]]:
+    if contact_array is None:
+        return []
+    active = np.argwhere(np.asarray(contact_array, dtype=bool))
+    return [(int(r), int(c)) for r, c in active]
 
 
 def make_default_grid_mapping(rows: int, cols: int, max_baseline: float) -> pd.DataFrame:
@@ -409,7 +435,7 @@ def load_grid_mapping(
     max_baseline: float,
 ) -> Tuple[pd.DataFrame, str, Optional[str]]:
     """Load grid mapping from uploaded CSV or local CSV path. Fallback to default mapping."""
-    required = {"row", "col", "x", "y", "enabled"}
+    required = {"row", "col", "x", "y"}
 
     try:
         if uploaded_mapping is not None:
@@ -437,6 +463,8 @@ def load_grid_mapping(
         df["col"] = df["col"].astype(int)
         df["x"] = df["x"].astype(float)
         df["y"] = df["y"].astype(float)
+        if "enabled" not in df.columns:
+            df["enabled"] = 1
         df = df[df["enabled"].astype(int) != 0]
         return df, source, None
     except Exception as exc:  # noqa: BLE001
@@ -448,19 +476,29 @@ def load_grid_mapping(
         )
 
 
-def contacts_to_positions(contacts: List[Tuple[int, int]], mapping_df: pd.DataFrame) -> np.ndarray:
+def contacts_to_positions_with_missing(
+    contacts: List[Tuple[int, int]],
+    mapping_df: pd.DataFrame,
+) -> Tuple[np.ndarray, int]:
     lookup: Dict[Tuple[int, int], Tuple[float, float]] = {}
     for _, row in mapping_df.iterrows():
         lookup[(int(row["row"]), int(row["col"]))] = (float(row["x"]), float(row["y"]))
 
     positions: List[Tuple[float, float]] = []
+    missing_count = 0
     for key in contacts:
         if key in lookup:
             positions.append(lookup[key])
+        else:
+            missing_count += 1
 
     if not positions:
-        return np.empty((0, 2), dtype=float)
-    return np.asarray(positions, dtype=float)
+        return np.empty((0, 2), dtype=float), missing_count
+    return np.asarray(positions, dtype=float), missing_count
+
+
+def contacts_to_positions(contacts: List[Tuple[int, int]], mapping_df: pd.DataFrame) -> np.ndarray:
+    return contacts_to_positions_with_missing(contacts, mapping_df)[0]
 
 
 @st.cache_resource(show_spinner=False)
@@ -470,6 +508,115 @@ def get_udp_socket(host: str, port: int) -> socket.socket:
     sock.bind((host, int(port)))
     sock.setblocking(False)
     return sock
+
+
+class UDPReceiver:
+    """Background UDP receiver that only stores packets for Streamlit to drain."""
+
+    def __init__(self, host: str = "127.0.0.1", port: int = 9900, max_queue: int = 200) -> None:
+        self.host = host
+        self.port = int(port)
+        self.max_queue = int(max_queue)
+        self._queue: Deque[Tuple[float, str, str]] = deque(maxlen=self.max_queue)
+        self._lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._socket: Optional[socket.socket] = None
+        self.running = False
+        self.total_received = 0
+        self.total_parse_errors = 0
+        self.last_packet = ""
+        self.last_received_time: Optional[float] = None
+        self.last_sender_address: Optional[str] = None
+        self.last_error: Optional[str] = None
+
+    def start(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop_event.clear()
+        self._thread = threading.Thread(target=self._run, name=f"UDPReceiver:{self.host}:{self.port}", daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind((self.host, self.port))
+            sock.settimeout(0.05)
+            self._socket = sock
+            with self._lock:
+                self.running = True
+                self.last_error = None
+
+            while not self._stop_event.is_set():
+                try:
+                    data, addr = sock.recvfrom(65535)
+                except socket.timeout:
+                    continue
+                except OSError as exc:
+                    if not self._stop_event.is_set():
+                        with self._lock:
+                            self.last_error = str(exc)
+                    break
+
+                now = time.time()
+                packet = data.decode("utf-8", errors="replace").strip()
+                sender = f"{addr[0]}:{addr[1]}"
+                with self._lock:
+                    self._queue.append((now, packet, sender))
+                    self.total_received += 1
+                    self.last_packet = packet
+                    self.last_received_time = now
+                    self.last_sender_address = sender
+        except OSError as exc:
+            with self._lock:
+                self.last_error = str(exc)
+        finally:
+            if self._socket is not None:
+                try:
+                    self._socket.close()
+                except OSError:
+                    pass
+            with self._lock:
+                self.running = False
+
+    def drain_packets(self) -> List[Tuple[float, str, str]]:
+        with self._lock:
+            packets = list(self._queue)
+            self._queue.clear()
+            return packets
+
+    def get_status(self) -> Dict[str, object]:
+        with self._lock:
+            return {
+                "host": self.host,
+                "port": self.port,
+                "running": self.running,
+                "queue_length": len(self._queue),
+                "total_received": self.total_received,
+                "total_parse_errors": self.total_parse_errors,
+                "last_packet": self.last_packet,
+                "last_received_time": self.last_received_time,
+                "last_sender_address": self.last_sender_address,
+                "last_error": self.last_error,
+            }
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self._socket is not None:
+            try:
+                self._socket.close()
+            except OSError:
+                pass
+        if self._thread is not None:
+            self._thread.join(timeout=0.2)
+
+
+@st.cache_resource(show_spinner=False)
+def get_udp_receiver(host: str, port: int, max_queue: int = 200) -> UDPReceiver:
+    receiver = UDPReceiver(host=host, port=port, max_queue=max_queue)
+    receiver.start()
+    return receiver
 
 
 def read_latest_udp_packet(
@@ -493,7 +640,7 @@ def read_latest_udp_packet(
         latest_raw = data.decode("ascii", errors="replace").strip()
         count += 1
         last_addr = f"{addr[0]}:{addr[1]}"
-        _, _, _, normalized, parse_error = parse_contact_packet(latest_raw)
+        _, _, _, _, normalized, parse_error = parse_contact_packet(latest_raw)
         if parse_error is None:
             latest_valid = normalized
             latest_error = None
@@ -908,6 +1055,30 @@ if "last_udp_count" not in st.session_state:
     st.session_state.last_udp_count = 0
 if "last_packet_error" not in st.session_state:
     st.session_state.last_packet_error = None
+if "udp_packet_history" not in st.session_state:
+    st.session_state.udp_packet_history = []
+if "udp_debug_pending_packets" not in st.session_state:
+    st.session_state.udp_debug_pending_packets = []
+if "last_valid_contact_array" not in st.session_state:
+    st.session_state.last_valid_contact_array = None
+if "last_valid_packet_rows" not in st.session_state:
+    st.session_state.last_valid_packet_rows = None
+if "last_valid_packet_cols" not in st.session_state:
+    st.session_state.last_valid_packet_cols = None
+if "last_valid_packet_seq" not in st.session_state:
+    st.session_state.last_valid_packet_seq = None
+if "last_valid_normalized_packet" not in st.session_state:
+    st.session_state.last_valid_normalized_packet = ""
+if "last_valid_packet_time" not in st.session_state:
+    st.session_state.last_valid_packet_time = None
+if "udp_refresh_drained_count" not in st.session_state:
+    st.session_state.udp_refresh_drained_count = 0
+if "udp_refresh_valid_count" not in st.session_state:
+    st.session_state.udp_refresh_valid_count = 0
+if "udp_refresh_parse_errors" not in st.session_state:
+    st.session_state.udp_refresh_parse_errors = 0
+if "udp_total_parse_errors" not in st.session_state:
+    st.session_state.udp_total_parse_errors = 0
 
 
 # ============================================================
@@ -1125,6 +1296,12 @@ with st.sidebar:
         mapping_warning = None
         udp_auto_update = False
         udp_update_interval = 0.5
+        udp_receiver_status: Dict[str, object] = {}
+        udp_packets_drained = 0
+        udp_packets_valid = 0
+        udp_parse_errors = 0
+        udp_queue_length_after_drain = 0
+        udp_debug_pending_count = 0
 
     else:
         st.subheader("接点パケット入力")
@@ -1152,33 +1329,111 @@ with st.sidebar:
         if position_input_mode == "UDPハードウェア入力":
             udp_host = st.text_input("UDP受信ホスト", value="127.0.0.1")
             udp_port = st.number_input("UDP受信ポート", min_value=1, max_value=65535, value=9900, step=1)
-            udp_update_interval = st.slider("画面更新間隔（秒）", 0.1, 2.0, 0.5, 0.1)
+            udp_update_interval = st.slider("画面更新間隔（秒）", 0.2, 1.0, 0.5, 0.1)
             udp_auto_update = st.checkbox("自動更新する", value=True)
+            udp_render_mode = st.radio(
+                "UDP表示モード",
+                ["最新状態のみ表示", "キューを1パケットずつ表示（デバッグ用）"],
+                index=0,
+            )
+
+            udp_packets_drained = 0
+            udp_packets_valid = 0
+            udp_parse_errors = 0
+            udp_debug_pending_count = 0
+            udp_refresh_counts = {"valid": 0, "parse_errors": 0}
+
+            def remember_packet(packet_info: Dict[str, object]) -> None:
+                history = list(st.session_state.udp_packet_history)
+                history.append(packet_info)
+                st.session_state.udp_packet_history = history[-10:]
+
+            def apply_packet(received_time: float, raw_packet: str, sender: str) -> bool:
+                contact_array, rows, cols, seq, normalized, error = parse_contact_packet(raw_packet)
+                if error is not None:
+                    udp_refresh_counts["parse_errors"] += 1
+                    st.session_state.udp_total_parse_errors += 1
+                    st.session_state.last_packet_error = error
+                    remember_packet(
+                        {
+                            "ok": False,
+                            "time": received_time,
+                            "sender": sender,
+                            "seq": seq,
+                            "packet": normalize_packet_text(raw_packet),
+                            "error": error,
+                        }
+                    )
+                    return False
+
+                udp_refresh_counts["valid"] += 1
+                st.session_state.last_valid_contact_array = contact_array
+                st.session_state.last_valid_packet_rows = rows
+                st.session_state.last_valid_packet_cols = cols
+                st.session_state.last_valid_packet_seq = seq
+                st.session_state.last_valid_normalized_packet = normalized
+                st.session_state.last_valid_packet_time = received_time
+                st.session_state.last_udp_packet = normalized
+                st.session_state.last_udp_time = received_time
+                st.session_state.last_packet_error = None
+                remember_packet(
+                    {
+                        "ok": True,
+                        "time": received_time,
+                        "sender": sender,
+                        "seq": seq,
+                        "packet": normalized,
+                        "error": None,
+                    }
+                )
+                return True
 
             try:
-                sock = get_udp_socket(udp_host, int(udp_port))
-                latest_valid, packet_count, last_addr, latest_raw, latest_error = read_latest_udp_packet(sock)
-                if latest_raw is not None:
-                    st.session_state.last_udp_raw_packet = normalize_packet_text(latest_raw)
-                    st.session_state.last_udp_raw_time = time.time()
-                    st.session_state.last_udp_addr = last_addr
-                    st.session_state.last_udp_count += packet_count
-                if latest_error is not None:
-                    st.session_state.last_packet_error = latest_error
-                if latest_valid is not None:
-                    if latest_valid != st.session_state.last_udp_packet:
-                        st.session_state.last_udp_packet = latest_valid
-                        st.session_state.last_udp_time = time.time()
-                    if latest_error is None:
-                        st.session_state.last_packet_error = None
-                hardware_packet = st.session_state.last_udp_packet
+                receiver = get_udp_receiver(udp_host, int(udp_port), 500)
+                drained_packets = receiver.drain_packets()
+                udp_packets_drained = len(drained_packets)
+                if drained_packets:
+                    last_time, last_packet, last_sender = drained_packets[-1]
+                    st.session_state.last_udp_raw_packet = normalize_packet_text(last_packet)
+                    st.session_state.last_udp_raw_time = last_time
+                    st.session_state.last_udp_addr = last_sender
+
+                if udp_render_mode == "キューを1パケットずつ表示（デバッグ用）":
+                    st.session_state.udp_debug_pending_packets.extend(drained_packets)
+                    while st.session_state.udp_debug_pending_packets:
+                        packet_time, raw_packet, sender = st.session_state.udp_debug_pending_packets.pop(0)
+                        if apply_packet(packet_time, raw_packet, sender):
+                            break
+                else:
+                    st.session_state.udp_debug_pending_packets = []
+                    for packet_time, raw_packet, sender in drained_packets:
+                        apply_packet(packet_time, raw_packet, sender)
+
+                udp_receiver_status = receiver.get_status()
+                udp_queue_length_after_drain = int(udp_receiver_status.get("queue_length", 0))
+                udp_debug_pending_count = len(st.session_state.udp_debug_pending_packets)
+                udp_packets_valid = udp_refresh_counts["valid"]
+                udp_parse_errors = udp_refresh_counts["parse_errors"]
+                st.session_state.udp_refresh_drained_count = udp_packets_drained
+                st.session_state.udp_refresh_valid_count = udp_packets_valid
+                st.session_state.udp_refresh_parse_errors = udp_parse_errors
+                st.session_state.last_udp_count = int(udp_receiver_status.get("total_received", 0))
+                hardware_packet = st.session_state.last_valid_normalized_packet
                 hardware_packet_error = st.session_state.last_packet_error
             except Exception as exc:  # noqa: BLE001
-                hardware_packet = st.session_state.last_udp_packet
-                hardware_packet_error = f"UDP受信ソケットを開けませんでした: {exc}"
+                udp_receiver_status = {"running": False, "last_error": str(exc)}
+                udp_queue_length_after_drain = 0
+                hardware_packet = st.session_state.last_valid_normalized_packet
+                hardware_packet_error = f"UDP受信スレッドを開始できませんでした: {exc}"
         else:
             udp_auto_update = False
             udp_update_interval = 0.5
+            udp_receiver_status = {}
+            udp_packets_drained = 0
+            udp_packets_valid = 0
+            udp_parse_errors = 0
+            udp_queue_length_after_drain = 0
+            udp_debug_pending_count = 0
             hardware_packet = st.text_area(
                 "テスト用パケット",
                 value="10000001 01000010 00100100 00011000 00011000 00100100 01000010 10000001",
@@ -1263,21 +1518,23 @@ if position_input_mode == "手動・プリセット配置":
     packet_contacts: List[Tuple[int, int]] = []
     packet_rows = None
     packet_cols = None
+    packet_seq = None
     normalized_packet = ""
     parse_error = None
+    mapping_missing_count = 0
 else:
-    contacts, packet_rows, packet_cols, normalized_packet, parse_error = parse_contact_packet(hardware_packet)
+    contact_array, packet_rows, packet_cols, packet_seq, normalized_packet, parse_error = parse_contact_packet(hardware_packet)
     if (
         position_input_mode == "UDPハードウェア入力"
         and not hardware_packet
-        and not st.session_state.last_udp_raw_packet
     ):
         parse_error = None
-    packet_contacts = contacts
+    packet_contacts = contact_array_to_cells(contact_array)
     if parse_error is None:
-        pos = contacts_to_positions(contacts, mapping_df)
+        pos, mapping_missing_count = contacts_to_positions_with_missing(packet_contacts, mapping_df)
     else:
         pos = np.empty((0, 2), dtype=float)
+        mapping_missing_count = 0
     actual_elements = int(len(pos))
     n_rep = actual_elements
     packet_status_message = "UDP/テキスト接点パケットを使用中"
@@ -1378,7 +1635,7 @@ st.caption(
 if position_input_mode != "手動・プリセット配置":
     st.markdown("---")
     st.subheader("接点パケット受信状態")
-    status_cols = st.columns(4)
+    status_cols = st.columns(5)
     with status_cols[0]:
         st.metric("検出接点数", len(packet_contacts))
     with status_cols[1]:
@@ -1386,11 +1643,45 @@ if position_input_mode != "手動・プリセット配置":
     with status_cols[2]:
         st.metric("グリッド", f"{packet_cols or '-'} x {packet_rows or '-'}")
     with status_cols[3]:
-        if st.session_state.last_udp_raw_time is None:
+        st.metric("seq", "-" if packet_seq is None else str(packet_seq))
+    with status_cols[4]:
+        last_seen_time = (
+            udp_receiver_status.get("last_received_time")
+            if position_input_mode == "UDPハードウェア入力" and udp_receiver_status
+            else st.session_state.last_udp_raw_time
+        )
+        if last_seen_time is None:
             last_time_text = "未受信"
         else:
-            last_time_text = f"{time.time() - st.session_state.last_udp_raw_time:.1f}秒前"
+            last_time_text = f"{time.time() - float(last_seen_time):.1f}秒前"
         st.metric("最終UDP受信", last_time_text)
+
+    if position_input_mode == "UDPハードウェア入力":
+        st.caption(
+            "UDP受信はバックグラウンドスレッドで行い、描画処理とは分離しています。"
+            "画面には通常、最新の有効状態を表示します。"
+        )
+        udp_cols = st.columns(5)
+        with udp_cols[0]:
+            st.metric("受信スレッド", "動作中" if udp_receiver_status.get("running") else "停止")
+        with udp_cols[1]:
+            st.metric("累積受信数", int(udp_receiver_status.get("total_received", 0)))
+        with udp_cols[2]:
+            st.metric("今回drain", udp_packets_drained)
+        with udp_cols[3]:
+            st.metric("今回有効", udp_packets_valid)
+        with udp_cols[4]:
+            st.metric("今回エラー", udp_parse_errors)
+
+        udp_cols2 = st.columns(4)
+        with udp_cols2[0]:
+            st.metric("drain後キュー", udp_queue_length_after_drain)
+        with udp_cols2[1]:
+            st.metric("デバッグ保留", udp_debug_pending_count)
+        with udp_cols2[2]:
+            st.metric("累積parseエラー", st.session_state.udp_total_parse_errors)
+        with udp_cols2[3]:
+            st.metric("送信元", str(udp_receiver_status.get("last_sender_address") or "-"))
 
     st.caption(packet_status_message)
     st.caption(f"対応表: {mapping_source}")
@@ -1402,6 +1693,10 @@ if position_input_mode != "手動・プリセット配置":
         st.error(hardware_packet_error)
     if parse_error:
         st.error(parse_error)
+    if len(pos) < 2:
+        st.warning("有効なアンテナが2点未満です。2点以上検出されると画像を再構成します。")
+    if mapping_missing_count > 0:
+        st.warning(f"対応表にない有効セル {mapping_missing_count} 点を無視しました。")
     if position_input_mode == "UDPハードウェア入力" and st.session_state.last_udp_raw_packet:
         st.caption("最後に受信したパケット")
         st.code(st.session_state.last_udp_raw_packet, language="text")
@@ -1410,6 +1705,22 @@ if position_input_mode != "手動・プリセット配置":
         st.code(normalized_packet, language="text")
     if st.session_state.last_udp_addr:
         st.caption(f"最後のUDP送信元: {st.session_state.last_udp_addr} / 累積受信数: {st.session_state.last_udp_count}")
+    if position_input_mode == "UDPハードウェア入力" and st.session_state.udp_packet_history:
+        with st.expander("最近のUDPパケット履歴"):
+            history_rows = []
+            for item in reversed(st.session_state.udp_packet_history[-10:]):
+                packet_time = item.get("time")
+                history_rows.append(
+                    {
+                        "状態": "OK" if item.get("ok") else "ERROR",
+                        "受信": "-" if packet_time is None else f"{time.time() - float(packet_time):.1f}秒前",
+                        "seq": item.get("seq"),
+                        "送信元": item.get("sender"),
+                        "パケット": item.get("packet"),
+                        "エラー": item.get("error"),
+                    }
+                )
+            st.dataframe(pd.DataFrame(history_rows), use_container_width=True)
 
 if outside_fraction > 0.05:
     st.warning(
@@ -1500,6 +1811,17 @@ st.write(
 """
 )
 
+with st.expander("接点検出ソフト側の送信おすすめ設定"):
+    st.write(
+        """
+- 起動時に現在の接点状態を1回送信する。
+- 接点状態が変わった時だけ送信する。
+- チャタリングが気になる場合は、変化後50〜100 ms程度待ってから送信する。
+- 変化後の同じ状態を50〜100 ms間隔で2〜3回再送すると、展示中の取りこぼしに強くなります。
+- デバッグ時以外は、常時高レート送信は避けるのがおすすめです。
+"""
+    )
+
 st.markdown("---")
 st.subheader("4. 各設定が何に効くか")
 
@@ -1553,5 +1875,8 @@ st.caption("SKAアウトリーチ用の教育プロトタイプです。")
 # ============================================================
 
 if position_input_mode == "UDPハードウェア入力" and udp_auto_update:
-    time.sleep(float(udp_update_interval))
-    safe_rerun()
+    if st_autorefresh is not None:
+        st_autorefresh(interval=int(float(udp_update_interval) * 1000), key="udp_refresh")
+    else:
+        time.sleep(float(udp_update_interval))
+        safe_rerun()
