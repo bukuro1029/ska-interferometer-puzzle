@@ -16,6 +16,10 @@ python -m pip install -r requirements-realtime.txt
 python realtime_display.py --fps 10 --host 127.0.0.1 --port 9900
 ```
 
+The default window is now less wide, and the four display panels are kept
+square. Use `--width` and `--height` if the exhibit monitor needs a different
+window size.
+
 UDP test sender:
 
 ```bash
@@ -68,3 +72,12 @@ Runtime keys:
 - `A` / `S`: decrease / increase uv smoothing
 
 The current values are shown along the top of the window.
+
+The default reconstructed-image palette is `thermal`. Start with another
+palette if needed:
+
+```bash
+python realtime_display.py --cmap icefire
+python realtime_display.py --cmap viridis
+python realtime_display.py --cmap RdBu_r
+```

@@ -40,7 +40,7 @@ import numpy as np
 
 PacketItem = Tuple[float, str, str]
 SAMPLE_MODELS = ["gas", "points", "bubbles", "ska"]
-CMAPS = ["RdBu_r", "seismic", "coolwarm", "gray"]
+CMAPS = ["thermal", "icefire", "viridis", "RdBu_r", "seismic", "coolwarm", "gray"]
 
 
 @dataclass
@@ -437,11 +437,14 @@ def asinh_stretch_signed(arr: np.ndarray, percentile: float = 99.0, stretch: flo
     return np.clip(np.arcsinh(stretch * data / scale) / np.arcsinh(stretch), -1.0, 1.0)
 
 
-def diverging_rgb(values: np.ndarray, cmap: str = "RdBu_r") -> np.ndarray:
+def diverging_rgb(values: np.ndarray, cmap: str = "thermal") -> np.ndarray:
     v = np.clip(values, -1.0, 1.0)
     rgb = np.empty((*v.shape, 3), dtype=float)
 
     palettes = {
+        "thermal": ((39, 55, 99), (13, 17, 24), (250, 190, 86)),
+        "icefire": ((48, 108, 170), (18, 20, 26), (232, 103, 76)),
+        "viridis": ((68, 1, 84), (35, 137, 142), (253, 231, 37)),
         "RdBu_r": ((49, 130, 189), (247, 247, 247), (202, 0, 32)),
         "seismic": ((0, 0, 160), (255, 255, 255), (160, 0, 0)),
         "coolwarm": ((76, 114, 176), (238, 238, 238), (196, 78, 82)),
@@ -487,6 +490,36 @@ def clamp(value: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, value))
 
 
+def square_panel_rects(width: int, height: int, top_h: int, margin: int) -> List[Tuple[int, int, int, int]]:
+    content_w = max(1, int(width) - 3 * margin)
+    content_h = max(1, int(height) - top_h - 3 * margin)
+    side = max(1, min(content_w // 2, content_h // 2))
+    total_w = 2 * side + margin
+    total_h = 2 * side + margin
+    start_x = max(margin, (int(width) - total_w) // 2)
+    start_y = top_h + max(margin, (int(height) - top_h - total_h) // 2)
+    return [
+        (start_x, start_y, side, side),
+        (start_x + side + margin, start_y, side, side),
+        (start_x, start_y + side + margin, side, side),
+        (start_x + side + margin, start_y + side + margin, side, side),
+    ]
+
+
+def square_inner_rect(
+    rect,
+    top_pad: int = 36,
+    bottom_pad: int = 30,
+    side_pad: int = 12,
+) -> Tuple[int, int, int, int]:
+    area_x = rect.x + side_pad
+    area_y = rect.y + top_pad
+    area_w = max(1, rect.w - 2 * side_pad)
+    area_h = max(1, rect.h - top_pad - bottom_pad)
+    side = max(1, min(area_w, area_h))
+    return area_x + (area_w - side) // 2, area_y + (area_h - side) // 2, side, side
+
+
 def draw_help_overlay(pygame, screen, font, small_font, args: argparse.Namespace, image_source: str) -> None:
     panel = pygame.Rect(44, 72, screen.get_width() - 88, screen.get_height() - 144)
     pygame.draw.rect(screen, (18, 21, 27), panel)
@@ -524,7 +557,7 @@ def draw_help_overlay(pygame, screen, font, small_font, args: argparse.Namespace
 def draw_image_panel(pygame, screen, rect, title: str, rgb: np.ndarray, font) -> None:
     pygame.draw.rect(screen, (22, 25, 30), rect)
     draw_text(screen, font, title, rect.x + 10, rect.y + 8)
-    inner = pygame.Rect(rect.x + 10, rect.y + 34, rect.w - 20, rect.h - 44)
+    inner = pygame.Rect(*square_inner_rect(rect))
     resized = resize_array_nearest(rgb, inner.w, inner.h)
     surf = pygame.surfarray.make_surface(np.transpose(resized, (1, 0, 2)))
     screen.blit(surf, inner)
@@ -534,7 +567,7 @@ def draw_image_panel(pygame, screen, rect, title: str, rgb: np.ndarray, font) ->
 def draw_layout_panel(pygame, screen, rect, title: str, pos: np.ndarray, radius: float, font) -> None:
     pygame.draw.rect(screen, (22, 25, 30), rect)
     draw_text(screen, font, title, rect.x + 10, rect.y + 8)
-    inner = pygame.Rect(rect.x + 18, rect.y + 42, rect.w - 36, rect.h - 56)
+    inner = pygame.Rect(*square_inner_rect(rect, top_pad=42, bottom_pad=24, side_pad=18))
     pygame.draw.rect(screen, (8, 10, 14), inner)
     center = (inner.centerx, inner.centery)
     scale = 0.45 * min(inner.w, inner.h) / max(radius, 1e-12)
@@ -561,6 +594,9 @@ def run_self_test() -> None:
     dirty, uv = reconstruct_dirty_image(sky, pos, 20.0, 20.0, 1.0, 1, 1)
     assert dirty.shape == (64, 64)
     assert uv.shape == (64, 64)
+    rects = square_panel_rects(1040, 960, 96, 12)
+    assert len(rects) == 4
+    assert all(w == h for _, _, w, h in rects)
     print("self-test ok")
 
 
@@ -735,13 +771,9 @@ def run_display(args: argparse.Namespace) -> None:
             screen.fill((12, 14, 18))
             margin = 12
             top_h = 96
-            panel_w = (args.width - 3 * margin) // 2
-            panel_h = (args.height - top_h - 3 * margin) // 2
             rects = [
-                pygame.Rect(margin, top_h, panel_w, panel_h),
-                pygame.Rect(2 * margin + panel_w, top_h, panel_w, panel_h),
-                pygame.Rect(margin, top_h + margin + panel_h, panel_w, panel_h),
-                pygame.Rect(2 * margin + panel_w, top_h + margin + panel_h, panel_w, panel_h),
+                pygame.Rect(*values)
+                for values in square_panel_rects(args.width, args.height, top_h, margin)
             ]
 
             recv_age = "-"
@@ -816,8 +848,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rows", type=int, default=8)
     parser.add_argument("--cols", type=int, default=8)
     parser.add_argument("--grid", type=int, default=96)
-    parser.add_argument("--width", type=int, default=1280)
-    parser.add_argument("--height", type=int, default=720)
+    parser.add_argument("--width", type=int, default=1040)
+    parser.add_argument("--height", type=int, default=960)
     parser.add_argument("--fullscreen", action="store_true")
     parser.add_argument("--fps", type=float, default=10.0)
     parser.add_argument("--max-frames", type=int, default=0)
@@ -829,7 +861,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--smooth-passes", type=int, default=2)
     parser.add_argument("--contrast-percentile", type=float, default=99.0)
     parser.add_argument("--stretch", type=float, default=4.0)
-    parser.add_argument("--cmap", choices=CMAPS, default="RdBu_r")
+    parser.add_argument("--cmap", choices=CMAPS, default="thermal")
     parser.add_argument("--image", default=None, help="Optional input image path. Press L at runtime to reload it.")
     parser.add_argument("--sample", choices=SAMPLE_MODELS, default="gas", help="Built-in input image when --image is omitted.")
     parser.add_argument("--font", default=None, help="Optional pygame font name.")
