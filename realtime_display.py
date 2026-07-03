@@ -10,10 +10,15 @@ Examples:
     python realtime_display.py
     python realtime_display.py --fullscreen --fps 10
     python realtime_display.py --host 127.0.0.1 --port 9900 --mapping grid_mapping.csv
+    python realtime_display.py --image /path/to/input.png
+    python realtime_display.py --sample points
     python realtime_display.py --self-test
 
 Pair with:
     python udp_sender_test.py --rows 8 --cols 8 --interval 0.2 --mode moving --seq
+
+Runtime keys:
+    H help, I cycle sample image, L reload --image, C cycle colormap, Q/Esc quit.
 """
 
 from __future__ import annotations
@@ -34,6 +39,8 @@ import numpy as np
 
 
 PacketItem = Tuple[float, str, str]
+SAMPLE_MODELS = ["gas", "points", "bubbles", "ska"]
+CMAPS = ["RdBu_r", "seismic", "coolwarm", "gray"]
 
 
 @dataclass
@@ -257,26 +264,53 @@ def gaussian_2d(n: int, x0: float, y0: float, sx: float, sy: float, amp: float =
     return amp * np.exp(-0.5 * (((x - x0) / sx) ** 2 + ((y - y0) / sy) ** 2))
 
 
-def make_sample_sky(n: int, seed: int = 42) -> np.ndarray:
+def make_sample_sky(n: int, seed: int = 42, model: str = "gas") -> np.ndarray:
     rng = np.random.default_rng(seed)
     sky = np.zeros((n, n), dtype=float)
-    sky += gaussian_2d(n, -0.20, 0.10, 0.35, 0.18, 1.0)
-    sky += gaussian_2d(n, 0.30, -0.30, 0.16, 0.09, 0.65)
-    for _ in range(12):
-        sky += gaussian_2d(
-            n,
-            rng.uniform(-0.85, 0.85),
-            rng.uniform(-0.85, 0.85),
-            rng.uniform(0.010, 0.028),
-            rng.uniform(0.010, 0.028),
-            rng.uniform(0.25, 1.1),
-        )
+
+    if model == "points":
+        for _ in range(28):
+            sky += gaussian_2d(
+                n,
+                rng.uniform(-0.88, 0.88),
+                rng.uniform(-0.88, 0.88),
+                rng.uniform(0.008, 0.020),
+                rng.uniform(0.008, 0.020),
+                rng.uniform(0.25, 1.2),
+            )
+    elif model == "bubbles":
+        sky += gaussian_2d(n, 0.0, 0.0, 0.80, 0.80, 0.75)
+        for _ in range(13):
+            r = rng.uniform(0.07, 0.20)
+            sky -= gaussian_2d(n, rng.uniform(-0.8, 0.8), rng.uniform(-0.8, 0.8), r, r, rng.uniform(0.20, 0.65))
+        sky -= sky.min()
+    elif model == "ska":
+        for t in np.linspace(-0.55, 0.55, 16):
+            sky += gaussian_2d(n, -0.58 + 0.10 * np.sin(10 * t), t, 0.020, 0.020, 0.9)
+            sky += gaussian_2d(n, -0.05, t, 0.018, 0.018, 0.9)
+            sky += gaussian_2d(n, 0.12 + 0.24 * abs(t), t, 0.018, 0.018, 0.9)
+            sky += gaussian_2d(n, 0.58 - 0.25 * t, t, 0.018, 0.018, 0.9)
+            sky += gaussian_2d(n, 0.58 + 0.25 * t, t, 0.018, 0.018, 0.9)
+        for x in np.linspace(0.43, 0.73, 12):
+            sky += gaussian_2d(n, x, 0.0, 0.018, 0.018, 0.9)
+    else:
+        sky += gaussian_2d(n, -0.20, 0.10, 0.35, 0.18, 1.0)
+        sky += gaussian_2d(n, 0.30, -0.30, 0.16, 0.09, 0.65)
+        for _ in range(12):
+            sky += gaussian_2d(
+                n,
+                rng.uniform(-0.85, 0.85),
+                rng.uniform(-0.85, 0.85),
+                rng.uniform(0.010, 0.028),
+                rng.uniform(0.010, 0.028),
+                rng.uniform(0.25, 1.1),
+            )
     return robust_normalize(sky)
 
 
-def load_image_sky(path: Optional[str], n: int) -> np.ndarray:
+def load_image_sky(path: Optional[str], n: int, sample: str = "gas") -> Tuple[np.ndarray, str]:
     if not path:
-        return make_sample_sky(n)
+        return make_sample_sky(n, model=sample), f"sample:{sample}"
     try:
         from PIL import Image, ImageOps
 
@@ -289,9 +323,9 @@ def load_image_sky(path: Optional[str], n: int) -> np.ndarray:
         arr -= arr.min()
         if arr.max() > 0:
             arr /= arr.max()
-        return arr
+        return arr, str(path)
     except Exception:
-        return make_sample_sky(n)
+        return make_sample_sky(n, model=sample), f"sample:{sample} (image load failed)"
 
 
 def add_disk(arr: np.ndarray, cx: int, cy: int, radius: int, value: float = 1.0) -> None:
@@ -449,6 +483,44 @@ def draw_text(surface, font, text: str, x: int, y: int, color=(235, 238, 241)) -
     surface.blit(rendered, (x, y))
 
 
+def clamp(value: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, value))
+
+
+def draw_help_overlay(pygame, screen, font, small_font, args: argparse.Namespace, image_source: str) -> None:
+    panel = pygame.Rect(44, 72, screen.get_width() - 88, screen.get_height() - 144)
+    pygame.draw.rect(screen, (18, 21, 27), panel)
+    pygame.draw.rect(screen, (105, 115, 130), panel, 1)
+    x = panel.x + 20
+    y = panel.y + 18
+    lines = [
+        "Realtime Display Help",
+        "",
+        "Input image:",
+        f"  current: {image_source}",
+        "  external file: python realtime_display.py --image /path/to/input.png",
+        f"  built-in sample: python realtime_display.py --sample gas|points|bubbles|ska  (current default: {args.sample})",
+        "",
+        "Runtime keys:",
+        "  H: show/hide this help    Q or Esc: quit",
+        "  I: cycle built-in sample image    L: reload --image file",
+        "  C: cycle dirty-image colormap",
+        "  Z/X: decrease/increase asinh stretch",
+        "  N/M: decrease/increase contrast percentile",
+        "  B/V: decrease/increase max baseline",
+        "  R/T: decrease/increase reference baseline",
+        "  U/J: increase/decrease uv zoom",
+        "  O/P: decrease/increase uv point size",
+        "  A/S: decrease/increase uv smoothing",
+        "",
+        "This Pygame version is intentionally for fast exhibit display.",
+        "Streamlit remains the richer adjustment/prototype interface.",
+    ]
+    for i, line in enumerate(lines):
+        draw_text(screen, font if i == 0 else small_font, line, x, y)
+        y += 25 if i == 0 else 21
+
+
 def draw_image_panel(pygame, screen, rect, title: str, rgb: np.ndarray, font) -> None:
     pygame.draw.rect(screen, (22, 25, 30), rect)
     draw_text(screen, font, title, rect.x + 10, rect.y + 8)
@@ -485,7 +557,7 @@ def run_self_test() -> None:
     pos, missing = positions_from_contacts(parsed.contact_array, mapping)
     assert len(pos) == 5
     assert missing == 0
-    sky = make_sample_sky(64)
+    sky = make_sample_sky(64, model="points")
     dirty, uv = reconstruct_dirty_image(sky, pos, 20.0, 20.0, 1.0, 1, 1)
     assert dirty.shape == (64, 64)
     assert uv.shape == (64, 64)
@@ -503,17 +575,29 @@ def run_display(args: argparse.Namespace) -> None:
     small_font = pygame.font.SysFont(args.font, 15)
     clock = pygame.time.Clock()
 
-    sky = load_image_sky(args.image, args.grid)
-    mapping, mapping_source, mapping_warning = load_grid_mapping(args.mapping, args.rows, args.cols, args.max_baseline)
+    sample_index = SAMPLE_MODELS.index(args.sample) if args.sample in SAMPLE_MODELS else 0
+    cmap_index = CMAPS.index(args.cmap) if args.cmap in CMAPS else 0
+    max_baseline = float(args.max_baseline)
+    reference_baseline = float(args.reference_baseline)
+    uv_zoom = float(args.uv_zoom)
+    point_radius = int(args.point_radius)
+    smooth_passes = int(args.smooth_passes)
+    contrast_percentile = float(args.contrast_percentile)
+    stretch = float(args.stretch)
+    show_help = bool(args.show_help)
+
+    sky, image_source = load_image_sky(args.image, args.grid, SAMPLE_MODELS[sample_index])
+    mapping, mapping_source, mapping_warning = load_grid_mapping(args.mapping, args.rows, args.cols, max_baseline)
     receiver = UDPReceiver(args.host, args.port, args.max_queue)
     receiver.start()
 
     pos = np.empty((0, 2), dtype=float)
     dirty = np.zeros((args.grid, args.grid), dtype=float)
     uv = np.zeros((args.grid, args.grid), dtype=float)
-    dirty_rgb = diverging_rgb(dirty, args.cmap)
+    dirty_rgb = diverging_rgb(dirty, CMAPS[cmap_index])
     uv_rgb = scalar_to_rgb(uv)
     sky_rgb = scalar_to_rgb(sky)
+    latest_contact_array: Optional[np.ndarray] = None
     latest_packet = ""
     latest_seq: Optional[int] = None
     latest_shape = "-"
@@ -529,11 +613,76 @@ def run_display(args: argparse.Namespace) -> None:
 
     try:
         while running:
+            recompute_needed = False
+            image_changed = False
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     running = False
                 elif event.type == pygame.KEYDOWN and event.key in {pygame.K_ESCAPE, pygame.K_q}:
                     running = False
+                elif event.type == pygame.KEYDOWN:
+                    key = event.key
+                    if key == pygame.K_h:
+                        show_help = not show_help
+                    elif key == pygame.K_i:
+                        sample_index = (sample_index + 1) % len(SAMPLE_MODELS)
+                        sky, image_source = load_image_sky(None, args.grid, SAMPLE_MODELS[sample_index])
+                        sky_rgb = scalar_to_rgb(sky)
+                        image_changed = True
+                    elif key == pygame.K_l:
+                        sky, image_source = load_image_sky(args.image, args.grid, SAMPLE_MODELS[sample_index])
+                        sky_rgb = scalar_to_rgb(sky)
+                        image_changed = True
+                    elif key == pygame.K_c:
+                        cmap_index = (cmap_index + 1) % len(CMAPS)
+                        dirty_rgb = diverging_rgb(asinh_stretch_signed(dirty, contrast_percentile, stretch), CMAPS[cmap_index])
+                    elif key == pygame.K_z:
+                        stretch = clamp(stretch - 0.5, 1.0, 10.0)
+                        dirty_rgb = diverging_rgb(asinh_stretch_signed(dirty, contrast_percentile, stretch), CMAPS[cmap_index])
+                    elif key == pygame.K_x:
+                        stretch = clamp(stretch + 0.5, 1.0, 10.0)
+                        dirty_rgb = diverging_rgb(asinh_stretch_signed(dirty, contrast_percentile, stretch), CMAPS[cmap_index])
+                    elif key == pygame.K_n:
+                        contrast_percentile = clamp(contrast_percentile - 0.5, 90.0, 99.9)
+                        dirty_rgb = diverging_rgb(asinh_stretch_signed(dirty, contrast_percentile, stretch), CMAPS[cmap_index])
+                    elif key == pygame.K_m:
+                        contrast_percentile = clamp(contrast_percentile + 0.5, 90.0, 99.9)
+                        dirty_rgb = diverging_rgb(asinh_stretch_signed(dirty, contrast_percentile, stretch), CMAPS[cmap_index])
+                    elif key == pygame.K_b:
+                        max_baseline = clamp(max_baseline - 5.0, 1.0, 100000.0)
+                        mapping, mapping_source, mapping_warning = load_grid_mapping(args.mapping, args.rows, args.cols, max_baseline)
+                        recompute_needed = True
+                    elif key == pygame.K_v:
+                        max_baseline = clamp(max_baseline + 5.0, 1.0, 100000.0)
+                        mapping, mapping_source, mapping_warning = load_grid_mapping(args.mapping, args.rows, args.cols, max_baseline)
+                        recompute_needed = True
+                    elif key == pygame.K_r:
+                        reference_baseline = clamp(reference_baseline - 5.0, 1.0, 100000.0)
+                        recompute_needed = True
+                    elif key == pygame.K_t:
+                        reference_baseline = clamp(reference_baseline + 5.0, 1.0, 100000.0)
+                        recompute_needed = True
+                    elif key == pygame.K_u:
+                        uv_zoom = clamp(uv_zoom + 0.1, 0.2, 4.0)
+                        recompute_needed = True
+                    elif key == pygame.K_j:
+                        uv_zoom = clamp(uv_zoom - 0.1, 0.2, 4.0)
+                        recompute_needed = True
+                    elif key == pygame.K_o:
+                        point_radius = max(1, point_radius - 1)
+                        recompute_needed = True
+                    elif key == pygame.K_p:
+                        point_radius = min(8, point_radius + 1)
+                        recompute_needed = True
+                    elif key == pygame.K_a:
+                        smooth_passes = max(0, smooth_passes - 1)
+                        recompute_needed = True
+                    elif key == pygame.K_s:
+                        smooth_passes = min(12, smooth_passes + 1)
+                        recompute_needed = True
+
+            if image_changed:
+                recompute_needed = True
 
             packets = receiver.drain_packets()
             drained_this_frame = len(packets)
@@ -556,35 +705,36 @@ def run_display(args: argparse.Namespace) -> None:
                 latest_seq = latest_valid.seq
                 latest_shape = f"{latest_valid.cols} x {latest_valid.rows}"
                 latest_sender = latest_sender_in_batch or "-"
-                pos, missing_count = positions_from_contacts(latest_valid.contact_array, mapping)
+                latest_contact_array = latest_valid.contact_array
+                recompute_needed = True
+
+            if recompute_needed and latest_contact_array is not None:
+                pos, missing_count = positions_from_contacts(latest_contact_array, mapping)
                 if len(pos) >= 2:
                     dirty, uv = reconstruct_dirty_image(
                         sky,
                         pos,
-                        args.max_baseline,
-                        args.reference_baseline,
-                        args.uv_zoom,
-                        args.point_radius,
-                        args.smooth_passes,
+                        max_baseline,
+                        reference_baseline,
+                        uv_zoom,
+                        point_radius,
+                        smooth_passes,
                     )
-                    dirty_rgb = diverging_rgb(
-                        asinh_stretch_signed(dirty, args.contrast_percentile, args.stretch),
-                        args.cmap,
-                    )
+                    dirty_rgb = diverging_rgb(asinh_stretch_signed(dirty, contrast_percentile, stretch), CMAPS[cmap_index])
                     uv_rgb = scalar_to_rgb(uv)
                     latest_error = ""
                     last_recompute = time.time()
                 else:
                     dirty = np.zeros((args.grid, args.grid), dtype=float)
                     uv = np.zeros((args.grid, args.grid), dtype=float)
-                    dirty_rgb = diverging_rgb(dirty, args.cmap)
+                    dirty_rgb = diverging_rgb(dirty, CMAPS[cmap_index])
                     uv_rgb = scalar_to_rgb(uv)
                     latest_error = "need at least 2 active antennas"
 
             status = receiver.get_status()
             screen.fill((12, 14, 18))
             margin = 12
-            top_h = 56
+            top_h = 96
             panel_w = (args.width - 3 * margin) // 2
             panel_h = (args.height - top_h - 3 * margin) // 2
             rects = [
@@ -617,17 +767,27 @@ def run_display(args: argparse.Namespace) -> None:
                 32,
                 (185, 193, 204),
             )
+            draw_text(
+                screen,
+                small_font,
+                f"image={image_source} | cmap={CMAPS[cmap_index]} | stretch={stretch:.1f} pct={contrast_percentile:.1f} "
+                f"maxBL={max_baseline:.1f} refBL={reference_baseline:.1f} uvZoom={uv_zoom:.1f} "
+                f"point={point_radius} smooth={smooth_passes} | H:help",
+                margin,
+                56,
+                (185, 193, 204),
+            )
             if mapping_warning or latest_error or status["last_error"]:
                 draw_text(
                     screen,
                     small_font,
                     f"{mapping_warning or ''} {latest_error or ''} {status['last_error'] or ''}".strip(),
                     margin,
-                    52,
+                    76,
                     (250, 176, 70),
                 )
 
-            draw_layout_panel(pygame, screen, rects[0], "Antenna / station layout", pos, args.max_baseline / 2.0, font)
+            draw_layout_panel(pygame, screen, rects[0], "Antenna / station layout", pos, max_baseline / 2.0, font)
             draw_image_panel(pygame, screen, rects[1], "Effective uv coverage", uv_rgb, font)
             draw_image_panel(pygame, screen, rects[2], "Reconstructed image (dirty image)", dirty_rgb, font)
             draw_image_panel(pygame, screen, rects[3], "Input image / true structure", sky_rgb, font)
@@ -635,6 +795,8 @@ def run_display(args: argparse.Namespace) -> None:
             if latest_packet:
                 draw_text(screen, small_font, f"packet: {latest_packet[:150]}", rects[2].x + 10, rects[2].bottom - 22)
             draw_text(screen, small_font, f"mapping: {mapping_source}", rects[3].x + 10, rects[3].bottom - 22)
+            if show_help:
+                draw_help_overlay(pygame, screen, font, small_font, args, image_source)
 
             pygame.display.flip()
             frame_count += 1
@@ -667,9 +829,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--smooth-passes", type=int, default=2)
     parser.add_argument("--contrast-percentile", type=float, default=99.0)
     parser.add_argument("--stretch", type=float, default=4.0)
-    parser.add_argument("--cmap", choices=["RdBu_r", "seismic", "coolwarm", "gray"], default="RdBu_r")
-    parser.add_argument("--image", default=None, help="Optional input image path. Uses a built-in sample if omitted.")
+    parser.add_argument("--cmap", choices=CMAPS, default="RdBu_r")
+    parser.add_argument("--image", default=None, help="Optional input image path. Press L at runtime to reload it.")
+    parser.add_argument("--sample", choices=SAMPLE_MODELS, default="gas", help="Built-in input image when --image is omitted.")
     parser.add_argument("--font", default=None, help="Optional pygame font name.")
+    parser.add_argument("--show-help", action="store_true", help="Show runtime key help at startup.")
     parser.add_argument("--self-test", action="store_true")
     return parser.parse_args()
 
