@@ -5,6 +5,7 @@ Run examples:
     python udp_sender_test.py
     python udp_sender_test.py --rows 8 --cols 8 --interval 0.2 --mode random
     python udp_sender_test.py --rows 8 --cols 8 --interval 0.8 --mode layout_demo --seq
+    python udp_sender_test.py --rows 8 --cols 8 --active 16 --interval 1.0 --mode ska_spiral --seq
     python udp_sender_test.py --packet "10100100 10100111 11101100"
     python udp_sender_test.py --rows 8 --cols 8 --interval 0.2 --mode moving --count 3
     python udp_sender_test.py --rows 8 --cols 8 --interval 0.2 --mode moving --seq
@@ -40,6 +41,42 @@ def moving_packet(rows: int, cols: int, step: int) -> str:
     return packet_from_active(rows, cols, active)
 
 
+def ska_spiral_candidates(rows: int, cols: int) -> list[tuple[int, int]]:
+    template = [
+        (4, 4),
+        (3, 3),
+        (4, 3),
+        (3, 4),
+        (3, 5),
+        (2, 6),
+        (1, 6),
+        (4, 2),
+        (4, 1),
+        (4, 0),
+        (5, 4),
+        (5, 5),
+        (6, 6),
+        (7, 6),
+        (2, 3),
+        (1, 2),
+        (0, 1),
+        (5, 3),
+        (6, 2),
+        (7, 1),
+        (2, 4),
+        (3, 2),
+        (4, 5),
+        (5, 6),
+        (1, 5),
+        (6, 5),
+    ]
+
+    return [
+        (round(r * (rows - 1) / 7.0), round(c * (cols - 1) / 7.0))
+        for r, c in template
+    ]
+
+
 def take_cells(candidates: list[tuple[int, int]], rows: int, cols: int, n_active: int) -> set[tuple[int, int]]:
     active = []
     seen = set()
@@ -69,7 +106,7 @@ def layout_demo_cells(rows: int, cols: int, n_active: int, step: int) -> tuple[s
     name = ""
     candidates: list[tuple[int, int]]
 
-    pattern = step % 7
+    pattern = step % 8
     if pattern == 0:
         name = "compact_core"
         candidates = sorted(cells, key=lambda rc: (rc[0] - center_r) ** 2 + (rc[1] - center_c) ** 2)
@@ -105,7 +142,7 @@ def layout_demo_cells(rows: int, cols: int, n_active: int, step: int) -> tuple[s
             for ranked in ranked_groups:
                 if k < len(ranked):
                     candidates.append(ranked[k])
-    else:
+    elif pattern == 6:
         name = "three_arms"
         candidates = [(round(center_r), round(center_c))]
         max_len = max(rows, cols)
@@ -113,6 +150,9 @@ def layout_demo_cells(rows: int, cols: int, n_active: int, step: int) -> tuple[s
             candidates.append((round(center_r), round(center_c + k)))
             candidates.append((round(center_r + 0.86 * k), round(center_c - 0.50 * k)))
             candidates.append((round(center_r - 0.86 * k), round(center_c - 0.50 * k)))
+    else:
+        name = "ska_spiral"
+        candidates = ska_spiral_candidates(rows, cols)
 
     return name, take_cells(candidates, rows, cols, n_active)
 
@@ -120,6 +160,12 @@ def layout_demo_cells(rows: int, cols: int, n_active: int, step: int) -> tuple[s
 def layout_demo_packet(rows: int, cols: int, n_active: int, step: int) -> tuple[str, str]:
     name, active = layout_demo_cells(rows, cols, n_active, step)
     return name, packet_from_active(rows, cols, active)
+
+
+def ska_spiral_packet(rows: int, cols: int, n_active: int) -> tuple[str, str]:
+    n_active = max(2, min(n_active, rows * cols))
+    active = take_cells(ska_spiral_candidates(rows, cols), rows, cols, n_active)
+    return "ska_spiral", packet_from_active(rows, cols, active)
 
 
 def main() -> None:
@@ -130,7 +176,7 @@ def main() -> None:
     parser.add_argument('--cols', type=int, default=8)
     parser.add_argument('--active', type=int, default=8)
     parser.add_argument('--interval', type=float, default=0.2)
-    parser.add_argument('--mode', choices=['moving', 'random', 'layout_demo'], default='moving')
+    parser.add_argument('--mode', choices=['moving', 'random', 'layout_demo', 'ska_spiral'], default='moving')
     parser.add_argument('--packet', default=None, help='Send this one packet repeatedly.')
     parser.add_argument('--count', type=int, default=0, help='Number of packets to send. 0 means run until Ctrl+C.')
     parser.add_argument('--seq', action='store_true', help='Prefix packets with seq=N for receiver debugging.')
@@ -149,6 +195,8 @@ def main() -> None:
                 label = 'random'
             elif args.mode == 'layout_demo':
                 label, packet = layout_demo_packet(args.rows, args.cols, args.active, step)
+            elif args.mode == 'ska_spiral':
+                label, packet = ska_spiral_packet(args.rows, args.cols, args.active)
             else:
                 packet = moving_packet(args.rows, args.cols, step)
                 label = 'moving'

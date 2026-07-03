@@ -32,9 +32,15 @@ Use this when checking whether the reconstructed image visibly changes:
 python udp_sender_test.py --rows 8 --cols 8 --active 12 --interval 1.0 --mode layout_demo --seq
 ```
 
-`layout_demo` cycles through compact, line, diagonal, outer-edge, and clustered
-antenna layouts so the uv coverage and dirty image should change much more
-clearly than with the smooth moving pattern.
+`layout_demo` cycles through compact, line, diagonal, outer-edge, clustered,
+three-arm, and SKA-like spiral antenna layouts so the uv coverage and dirty
+image should change much more clearly than with the smooth moving pattern.
+
+Use this when checking only the SKA-like dense-core plus spiral-arm layout:
+
+```bash
+python udp_sender_test.py --rows 8 --cols 8 --active 16 --interval 1.0 --mode ska_spiral --seq
+```
 
 ## Change Input Image
 
