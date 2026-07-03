@@ -22,6 +22,16 @@ UDP test sender:
 python udp_sender_test.py --rows 8 --cols 8 --interval 0.2 --mode moving --seq
 ```
 
+Use this when checking whether the reconstructed image visibly changes:
+
+```bash
+python udp_sender_test.py --rows 8 --cols 8 --active 12 --interval 1.0 --mode layout_demo --seq
+```
+
+`layout_demo` cycles through compact, line, diagonal, outer-edge, and clustered
+antenna layouts so the uv coverage and dirty image should change much more
+clearly than with the smooth moving pattern.
+
 ## Change Input Image
 
 Use a built-in sample:
