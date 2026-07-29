@@ -1,0 +1,131 @@
+SKA干渉計パズル リアルタイム表示版 マニュアル
+
+1. このアプリについて
+
+このアプリは、UDPで受信したアンテナの配置情報から、電波干渉計の
+観測情報（UV分布）と天体画像の再構成結果をリアルタイムに表示します。
+展示用の高速表示にはPygame版を使用します。
+
+
+2. 初回セットアップ
+
+ターミナルでアプリのフォルダへ移動し、必要なライブラリを一度だけ
+インストールします。
+
+    cd ska-interferometer-puzzle
+    python -m pip install -r requirements-realtime.txt
+
+
+3. 表示アプリの起動
+
+同じPC上でテスト送信を行う場合:
+
+    python realtime_display.py --fps 10
+
+Raspberry Piなど別の機器からUDPを受信する場合:
+
+    python realtime_display.py --host 0.0.0.0 --port 9900 --fps 10
+
+送信側は、表示用PCのIPアドレスのUDPポート9900宛てにパケットを送信
+してください。起動直後は通常のウィンドウで開きます。F11キーで全画面
+表示に切り替えられます。
+
+
+4. テスト送信
+
+表示アプリを起動した状態で、別のターミナルから次を実行します。
+
+    python udp_sender_test.py --rows 8 --cols 8 --active 16 --interval 1.0 --mode layout_demo --seq
+
+layout_demoでは、コンパクト配置、直線配置、クラスター配置、SKA型
+スパイラル配置などが順番に送信されます。アンテナ配置、UV分布、再構成
+画像が変化することを確認してください。
+
+SKA型スパイラル配置だけを表示したい場合:
+
+    python udp_sender_test.py --rows 8 --cols 8 --active 16 --interval 1.0 --mode ska_spiral --seq
+
+
+5. 主な操作キー
+
+    W       再構成画像の表示形式を切替
+            展示表示 -> CLEAN表示 -> EHT風表示 -> 残差表示
+    C       展示時のカラーテーマを切替
+    D       展示表示と科学表示を切替
+    I       内蔵サンプル画像を切替
+    L       --imageで指定した外部画像を再読み込み
+    H       操作説明を表示・非表示
+    F11     全画面表示と通常ウィンドウを切替
+    Esc     全画面を解除。通常ウィンドウ時は終了
+    Q       アプリを終了
+
+再構成画像の表示形式:
+
+    展示表示    色彩を使った展示向けの表示
+    CLEAN表示   電波干渉計で一般的な復元画像風の表示。等高線と合成ビーム
+                記号を表示する
+    EHT風表示   黒地に赤・橙・白を使う高コントラスト表示
+    残差表示    CLEAN後に残った成分を青と赤で示す診断用表示
+
+EHT風表示は色とコントラストの見せ方だけを変える機能です。実際の観測
+情報や解像度を増やすものではありません。
+
+
+6. サンプル画像の選択
+
+起動時に内蔵サンプルを指定できます。
+
+    python realtime_display.py --sample ring
+    python realtime_display.py --sample cross
+    python realtime_display.py --sample resolution
+
+ringはEHT風表示、crossとresolutionはアンテナ配置による再構成結果の
+違いを見せる用途に向いています。起動後はIキーでもサンプルを切り替え
+られます。
+
+
+7. 任意の画像を使う場合
+
+PNGまたはJPEG画像などを指定して起動できます。
+
+    python realtime_display.py --image /path/to/input.png
+
+ファイルを更新した後は、アプリを終了せずLキーで読み込み直せます。
+
+
+8. 起動時に表示形式を指定する場合
+
+    python realtime_display.py --reconstruction-style clean
+    python realtime_display.py --reconstruction-style eht --sample ring
+    python realtime_display.py --reconstruction-style residual
+
+
+9. 表示の調整
+
+    Z / X   コントラストの伸張を弱く / 強くする
+    N / M   コントラストの基準パーセンタイルを下げる / 上げる
+    B / V   最大基線を短く / 長くする
+    R / T   基準基線を短く / 長くする
+    J / U   UV表示の倍率を下げる / 上げる
+    O / P   UV点の大きさを小さく / 大きくする
+    A / S   UV平滑化を弱く / 強くする
+
+
+10. 困ったとき
+
+・画面が更新されない場合
+  送信側の宛先IPアドレスとポート番号9900を確認してください。
+
+・別の機器からパケットが届かない場合
+  表示アプリを--host 0.0.0.0で起動し、PCと送信機が同じネットワークに
+  接続されていることを確認してください。
+
+・表示が重い場合
+  解像度を下げて起動してください。
+
+    python realtime_display.py --fps 10 --grid 96
+
+・より高精細に表示したい場合
+  十分に高速なPCでは、次のように起動できます。
+
+    python realtime_display.py --fps 10 --grid 256
