@@ -272,7 +272,7 @@ with left:
     st.subheader(f"再構成した画像: {STYLE_LABELS[reconstruction_style]}")
     st.pyplot(
         reconstruction_figure(reconstruction_rgb, reconstruction, reconstruction_style, sparse_uv),
-        use_container_width=True,
+        width="stretch",
     )
     if reconstruction_style == "eht":
         st.caption("EHT風表示は見せ方のみを変える機能で、観測情報や解像度を増やすものではありません。")
@@ -283,12 +283,12 @@ with right:
     top_left, top_right = st.columns(2)
     with top_left:
         st.caption("アンテナのならび")
-        st.pyplot(layout_figure(positions, float(max_baseline) / 2.0), use_container_width=True)
+        st.pyplot(layout_figure(positions, float(max_baseline) / 2.0), width="stretch")
     with top_right:
         st.caption("観測情報の分布 (UV)")
-        st.image(uv_rgb, use_container_width=True)
+        st.image(uv_rgb, width="stretch")
     st.caption(f"元の画像: {image_label}")
-    st.image(source_rgb, use_container_width=True)
+    st.image(source_rgb, width="stretch")
 
 with st.expander("この表示について"):
     st.write(
