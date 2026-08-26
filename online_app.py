@@ -67,6 +67,10 @@ st.markdown(
     [data-testid="stFileUploaderDropzone"] button > * {
         display: none !important;
     }
+    [data-testid="stFileUploaderDropzone"] button [data-testid="stMarkdownContainer"],
+    [data-testid="stFileUploaderDropzone"] button [data-testid="stIconMaterial"] {
+        display: none !important;
+    }
     [data-testid="stFileUploaderDropzone"] button::after {
         content: "画像を選択";
         font-size: 0.875rem;
