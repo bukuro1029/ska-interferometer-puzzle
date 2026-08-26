@@ -35,10 +35,42 @@ from realtime_display import (
 
 
 st.set_page_config(
-    page_title="SKA Interferometer Puzzle: Online Exhibit",
+    page_title="SKA干渉計パズル オンライン展示版",
     page_icon="📡",
     layout="wide",
     initial_sidebar_state="expanded",
+)
+
+st.markdown(
+    """
+    <style>
+    [data-testid="stFileUploaderDropzoneInstructions"] span {
+        display: none;
+    }
+    [data-testid="stFileUploaderDropzoneInstructions"] div::before {
+        content: "画像をここにドラッグ＆ドロップ";
+        font-size: 0.9rem;
+    }
+    [data-testid="stFileUploaderDropzoneInstructions"] small {
+        display: none;
+    }
+    [data-testid="stFileUploaderDropzoneInstructions"]::after {
+        content: "PNG・JPG（1ファイル200MBまで）";
+        display: block;
+        color: #9ca3af;
+        font-size: 0.75rem;
+        margin-top: 0.2rem;
+    }
+    [data-testid="stFileUploaderDropzone"] button {
+        font-size: 0;
+    }
+    [data-testid="stFileUploaderDropzone"] button::after {
+        content: "画像を選択";
+        font-size: 0.875rem;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
 )
 
 
@@ -70,6 +102,16 @@ STYLE_LABELS: Dict[str, str] = {
     "clean": "CLEAN表示",
     "eht": "EHT風表示",
     "residual": "残差表示",
+}
+
+THEME_LABELS: Dict[str, str] = {
+    "aurora": "オーロラ",
+    "ember": "炎",
+    "tide": "海",
+    "violet": "紫",
+    "mint": "ミント",
+    "mono": "モノクロ",
+    "coral": "コーラル",
 }
 
 
@@ -221,18 +263,18 @@ def reconstruction_figure(
 
 
 st.title("SKA干渉計パズル")
-st.caption("アンテナのならびを変えて、観測情報（UV）と再構成画像の変化を体験します。")
+st.caption("アンテナのならびを変えて、元の天体画像がどのように再構成されるかを体験します。")
 
 with st.sidebar:
     st.header("展示の設定")
     sample = st.selectbox("元の天体画像", SAMPLE_MODELS, format_func=lambda value: SAMPLE_LABELS[value])
-    uploaded_image = st.file_uploader("任意画像を使う", type=["png", "jpg", "jpeg"])
+    uploaded_image = st.file_uploader("任意の画像を使う", type=["png", "jpg", "jpeg"])
     layout = st.selectbox("アンテナのならび", list(LAYOUT_LABELS), format_func=lambda value: LAYOUT_LABELS[value], index=4)
     antenna_count = st.slider("アンテナ数", min_value=6, max_value=64, value=16, step=1)
     max_baseline = st.slider("最大基線", min_value=20, max_value=150, value=74, step=1)
     layout_seed = st.slider("ならびの変化", min_value=0, max_value=20, value=0, step=1)
     reconstruction_style = st.selectbox("再構成画像の表示", list(STYLE_LABELS), format_func=lambda value: STYLE_LABELS[value], index=0)
-    theme = st.selectbox("展示カラー", EXHIBIT_THEMES, index=0)
+    theme = st.selectbox("展示カラー", EXHIBIT_THEMES, format_func=lambda value: THEME_LABELS[value], index=0)
     st.divider()
     st.caption("このオンライン版はブラウザ操作用です。Raspberry PiからのUDP受信と高速表示にはローカルPygame版を使用します。")
 
@@ -259,7 +301,6 @@ reconstruction_rgb = render_exhibit_reconstruction_rgb(
     stretch=4.0,
 )
 source_rgb = exhibit_scalar_rgb(sky, "sky", theme)
-uv_rgb = exhibit_scalar_rgb(sparse_uv, "uv", theme)
 baseline_count = antenna_count * (antenna_count - 1) // 2
 
 metrics = st.columns(3)
@@ -285,13 +326,27 @@ with right:
         st.caption("アンテナのならび")
         st.pyplot(layout_figure(positions, float(max_baseline) / 2.0), width="stretch")
     with top_right:
-        st.caption("観測情報の分布 (UV)")
-        st.image(uv_rgb, width="stretch")
+        st.markdown("#### 3つの表示の見方")
+        st.markdown(
+            """
+            **再構成した画像**
+
+            選んだアンテナ配置で、天体がどこまで再現できたかを示します。
+
+            **アンテナのならび**
+
+            観測に使うアンテナの位置です。配置や台数によって、画像の細かさや形が変わります。
+
+            **元の画像**
+
+            再構成前の天体画像です。再構成した画像と見比べてください。
+            """
+        )
     st.caption(f"元の画像: {image_label}")
     st.image(source_rgb, width="stretch")
 
 with st.expander("この表示について"):
     st.write(
-        "これは電波干渉計の基本を体験するための簡易シミュレーターです。アンテナの組合せから得られるUV分布を使い、"
+        "これは電波干渉計の基本を体験するための簡易シミュレーターです。アンテナ同士の組合せから得られる観測情報を使い、"
         "天体画像を簡易的に再構成しています。実際の観測解析では、較正やより高度な画像再構成処理も行います。"
     )
